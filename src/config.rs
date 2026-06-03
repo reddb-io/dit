@@ -7,13 +7,17 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use rdev::Key;
 
 /// Cross-platform voice dictation via ElevenLabs Scribe v2 Realtime.
 #[derive(Parser, Debug)]
 #[command(name = "dit", version, about)]
 pub struct Cli {
+    /// Subcommand (omit to run dictation directly).
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Language code passed to Scribe (e.g. `pt`, `en`, `es`).
     #[arg(long, default_value = "pt")]
     pub language: String,
@@ -58,6 +62,29 @@ pub struct Cli {
     /// List input audio devices and exit.
     #[arg(long)]
     pub list_devices: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Manage the autostart user service (runs dit in your login session).
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServiceAction {
+    /// Install and enable the autostart user service.
+    Install {
+        /// Flags to pass to dit when the service runs it (e.g. --language en).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Stop and remove the autostart user service.
+    Uninstall,
+    /// Show whether the service is installed and running.
+    Status,
 }
 
 /// Fully-resolved runtime settings.

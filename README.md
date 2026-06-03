@@ -151,6 +151,32 @@ Press **F9** → speak → press **F9** again. `Ctrl+C` quits. Crank up logs wit
 
 ---
 
+## Run it always (autostart)
+
+`dit` is a long-running process — it has to be, since *something* must listen for the hotkey. To
+have it start at login and stay ready, install it as a **user service**:
+
+```bash
+dit service install                     # autostart with defaults
+dit service install --language en --no-filler   # …or bake in your flags
+dit service status
+dit service uninstall
+```
+
+| OS | What it installs |
+|---|---|
+| **Linux** | a systemd `--user` service (`journalctl --user -u dit -f` for logs), or an XDG autostart `.desktop` entry if there's no user systemd |
+| **macOS** | a LaunchAgent in `~/Library/LaunchAgents` |
+| **Windows** | a logon task via Task Scheduler |
+
+> [!IMPORTANT]
+> It installs a **user-session agent**, not a root/system daemon — and that's deliberate. A system
+> service runs isolated from your login session (no display, no audio, no input access on Linux; in
+> "session 0" with no desktop on Windows), so it physically *couldn't* read your keyboard or type
+> into your apps. `dit` must live inside your graphical session.
+
+---
+
 ## Nothing gets lost
 
 Two surfaces keep your words safe without ever risking the focused app's text:

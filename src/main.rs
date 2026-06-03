@@ -10,6 +10,7 @@ mod config;
 mod inject;
 mod notify;
 mod output;
+mod service;
 mod transcribe;
 
 use std::sync::Arc;
@@ -22,7 +23,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
-use config::{Cli, Config};
+use config::{Cli, Command, Config};
 use inject::Injector;
 use transcribe::run_session;
 
@@ -40,6 +41,9 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if let Some(Command::Service { action }) = &cli.command {
+        return service::run(action);
+    }
     if cli.list_devices {
         return audio::list_devices();
     }
