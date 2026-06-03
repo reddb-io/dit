@@ -30,6 +30,22 @@ pub struct Cli {
     #[arg(long)]
     pub device: Option<String>,
 
+    /// Remove filler words ("uh", "um", …) from the transcript (`no_verbatim`).
+    #[arg(long)]
+    pub no_filler: bool,
+
+    /// Bias the model toward a term (name, jargon, product). Repeatable.
+    #[arg(long = "keyterm", value_name = "TERM")]
+    pub keyterms: Vec<String>,
+
+    /// Seconds of silence before VAD commits a segment (lower = snappier, more fragmented).
+    #[arg(long, default_value_t = 1.5)]
+    pub vad_silence: f64,
+
+    /// API region: `global`, `us`, `eu`, `in` (data residency).
+    #[arg(long, default_value = "global")]
+    pub region: String,
+
     /// Path to a dotenv-style file holding `ELEVENLABS_API_KEY`.
     /// Defaults to `~/.dictator.env`.
     #[arg(long)]
@@ -48,6 +64,10 @@ pub struct Config {
     pub model: String,
     pub hotkey: Key,
     pub device: Option<String>,
+    pub no_filler: bool,
+    pub keyterms: Vec<String>,
+    pub vad_silence: f64,
+    pub region: String,
 }
 
 /// Target sample rate sent to the API (Scribe expects 16 kHz mono s16le).
@@ -86,16 +106,62 @@ impl Config {
             model: cli.model.clone(),
             hotkey,
             device: cli.device.clone(),
+            no_filler: cli.no_filler,
+            keyterms: cli.keyterms.clone(),
+            vad_silence: cli.vad_silence,
+            region: cli.region.clone(),
         })
     }
 
-    /// Build the Scribe realtime WebSocket URL (VAD commit strategy).
-    pub fn ws_url(&self) -> String {
-        format!(
-            "wss://api.elevenlabs.io/v1/speech-to-text/realtime?model_id={}&language_code={}&commit_strategy=vad",
-            self.model, self.language
-        )
+    /// Resolve the API host for the configured region (data residency).
+    fn host(&self) -> &'static str {
+        match self.region.as_str() {
+            "us" => "api.us.elevenlabs.io",
+            "eu" => "api.eu.residency.elevenlabs.io",
+            "in" => "api.in.residency.elevenlabs.io",
+            _ => "api.elevenlabs.io",
+        }
     }
+
+    /// Build the Scribe realtime WebSocket URL.
+    ///
+    /// We always send 16 kHz mono PCM (`audio_format=pcm_16000`) because the
+    /// capture pipeline resamples to that rate, and use VAD-based commits so the
+    /// server closes segments on natural pauses.
+    pub fn ws_url(&self) -> String {
+        let mut url = format!(
+            "wss://{}/v1/speech-to-text/realtime\
+             ?model_id={}&language_code={}&audio_format=pcm_{}\
+             &commit_strategy=vad&vad_silence_threshold_secs={}",
+            self.host(),
+            self.model,
+            self.language,
+            SAMPLE_RATE,
+            self.vad_silence,
+        );
+        if self.no_filler {
+            url.push_str("&no_verbatim=true");
+        }
+        for term in &self.keyterms {
+            url.push_str("&keyterms=");
+            url.push_str(&percent_encode(term));
+        }
+        url
+    }
+}
+
+/// Minimal percent-encoding for query values (keyterms may contain spaces/UTF-8).
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// Minimal dotenv loader: `KEY=VALUE` lines, `#` comments, no overrides of

@@ -1,9 +1,11 @@
 //! A single dictation session: capture -> Scribe v2 Realtime WebSocket -> paste.
 //!
 //! Faithful to the original `whisperflow.py` semantics:
+//!
 //!   * `partial_transcript`   → ignored (unstable preview).
 //!   * `committed_transcript` → stable per-segment text; pasted immediately.
 //!   * content dedup          → the same segment is never pasted twice.
+//!
 //! On stop, an empty `commit: true` frame flushes the final segment, then we
 //! keep reading for `FINAL_WAIT_SECS` to catch trailing commits.
 
@@ -19,7 +21,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::{ClientRequestBuilder, Message};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::audio::{self, Resampler};
 use crate::config::{Config, CHUNK_MS, FINAL_WAIT_SECS, SAMPLE_RATE};
@@ -52,21 +54,35 @@ pub async fn run_session(cfg: Config, injector: Injector, stop: Arc<Notify>) -> 
     let recv = tokio::spawn(async move {
         let mut last_committed = String::new();
         while let Some(frame) = read.next().await {
-            let Ok(Message::Text(raw)) = frame else {
-                if matches!(frame, Ok(Message::Close(_)) | Err(_)) {
+            let raw = match frame {
+                Ok(Message::Text(raw)) => raw,
+                Ok(Message::Close(_)) => break,
+                // tungstenite auto-queues Pong for Ping; flushed by the sender's
+                // next audio frame. Binary/Pong/raw frames are unused here.
+                Ok(_) => continue,
+                Err(e) => {
+                    warn!("websocket read error: {e}");
                     break;
                 }
-                continue;
             };
             let Ok(evt) = serde_json::from_str::<Value>(&raw) else {
                 continue;
             };
-            match evt
+            let mtype = evt
                 .get("message_type")
                 .and_then(Value::as_str)
-                .unwrap_or("")
-            {
-                "committed_transcript" => {
+                .unwrap_or("");
+            // Every error payload carries its detail under `error`.
+            let detail = || {
+                evt.get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or(mtype)
+                    .to_string()
+            };
+            match mtype {
+                // Stable text — both the plain and the timestamped variant carry
+                // the committed segment under `text`.
+                "committed_transcript" | "committed_transcript_with_timestamps" => {
                     let text = evt.get("text").and_then(Value::as_str).unwrap_or("").trim();
                     if text.is_empty() || text == last_committed {
                         continue;
@@ -75,14 +91,38 @@ pub async fn run_session(cfg: Config, injector: Injector, stop: Arc<Notify>) -> 
                     injector.paste(format!("{text} "));
                     info!("committed: {text}");
                 }
-                "session_started" => info!("scribe session_started"),
-                "partial_transcript" => {} // ignored on purpose
-                other if other.contains("error") => {
-                    warn!("server error: {evt}");
-                    notify("STT error", &evt.to_string());
+                // Unstable preview — ignored on purpose (typing it char-by-char
+                // would scramble output); surfaced only at debug level.
+                "partial_transcript" => {
+                    if let Some(t) = evt.get("text").and_then(Value::as_str) {
+                        debug!("partial: {t}");
+                    }
+                }
+                "session_started" => {
+                    let sid = evt.get("session_id").and_then(Value::as_str).unwrap_or("");
+                    info!("scribe session_started: {sid}");
+                }
+                // Transient notices — log and keep transcribing.
+                "commit_throttled" | "insufficient_audio_activity" | "queue_overflow" => {
+                    warn!("scribe notice [{mtype}]: {}", detail());
+                }
+                // Fatal — surface to the user and end the session.
+                "error"
+                | "auth_error"
+                | "quota_exceeded"
+                | "unaccepted_terms"
+                | "rate_limited"
+                | "resource_exhausted"
+                | "session_time_limit_exceeded"
+                | "input_error"
+                | "chunk_size_exceeded"
+                | "transcriber_error" => {
+                    let msg = detail();
+                    warn!("scribe error [{mtype}]: {msg}");
+                    notify("dictator — STT error", &format!("{mtype}: {msg}"));
                     break;
                 }
-                _ => {}
+                other => debug!("unhandled message: {other} {evt}"),
             }
         }
         injector.restore();
@@ -116,6 +156,7 @@ pub async fn run_session(cfg: Config, injector: Injector, stop: Arc<Notify>) -> 
             json!({
                 "message_type": "input_audio_chunk",
                 "audio_base_64": "",
+                "sample_rate": SAMPLE_RATE,
                 "commit": true
             })
             .to_string(),
@@ -150,6 +191,8 @@ where
         let payload = json!({
             "message_type": "input_audio_chunk",
             "audio_base_64": STANDARD.encode(&chunk),
+            "sample_rate": SAMPLE_RATE,
+            "commit": false,
         })
         .to_string();
         write.send(Message::text(payload)).await?;

@@ -59,11 +59,10 @@ fn main() -> Result<()> {
     // blocks for the lifetime of the program.
     let mut key_down = false;
     let result = rdev::listen(move |event: Event| match event.event_type {
-        EventType::KeyPress(k) if k == hotkey => {
-            if !key_down {
-                key_down = true;
-                let _ = tx.send(Control::Toggle);
-            }
+        // Guard on `!key_down` so key-repeat while held doesn't re-toggle.
+        EventType::KeyPress(k) if k == hotkey && !key_down => {
+            key_down = true;
+            let _ = tx.send(Control::Toggle);
         }
         EventType::KeyRelease(k) if k == hotkey => {
             key_down = false;

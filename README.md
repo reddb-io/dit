@@ -91,11 +91,15 @@ echo 'ELEVENLABS_API_KEY=sk_your_key_here' > ~/.dictator.env
 ## Use
 
 ```bash
-dictator                    # F9 toggle, Portuguese
-dictator --language en      # English
-dictator --hotkey F8        # any of F1..F12
-dictator --device "Fifine"  # prefer an input device by name substring
-dictator --list-devices     # list inputs and exit
+dictator                              # F9 toggle, Portuguese
+dictator --language en                # English
+dictator --hotkey F8                  # any of F1..F12
+dictator --device "Fifine"            # prefer an input device by name substring
+dictator --no-filler                  # strip "uh"/"um" from the output
+dictator --keyterm RedDB --keyterm Scribe   # bias toward names/jargon (repeatable)
+dictator --vad-silence 0.8            # commit faster on shorter pauses
+dictator --region eu                  # EU data residency
+dictator --list-devices               # list inputs and exit
 ```
 
 Press **F9** → speak → press **F9** again. `Ctrl+C` quits. Crank up logs with `RUST_LOG=dictator=debug`.
@@ -106,8 +110,17 @@ Press **F9** → speak → press **F9** again. `Ctrl+C` quits. Crank up logs wit
 | `--model` | `scribe_v2_realtime` | Scribe realtime model id |
 | `--hotkey` | `F9` | Toggle key (`F1`..`F12`) |
 | `--device` | *system default* | Input device name substring |
+| `--no-filler` | off | Remove filler words (`no_verbatim`) |
+| `--keyterm <TERM>` | — | Bias the model toward a term; repeatable |
+| `--vad-silence <SECS>` | `1.5` | Silence before a segment commits — lower = snappier |
+| `--region` | `global` | API region: `global`, `us`, `eu`, `in` |
 | `--env-file` | `~/.dictator.env` | Path to the key file |
 | `--list-devices` | — | Print input devices and exit |
+
+> [!TIP]
+> For the sharpest transcripts: pass names and jargon with `--keyterm` (e.g. `--keyterm Kubernetes`),
+> turn on `--no-filler` for clean prose, and lower `--vad-silence` (e.g. `0.8`) if you want each
+> sentence to land sooner at the cost of slightly more fragmentation.
 
 ---
 
