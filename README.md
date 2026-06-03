@@ -36,14 +36,21 @@ a Linux/Wayland-only Python script. This is the portable, dependency-light rewri
 
 ## Install
 
-### One-liner (Linux / macOS)
+### One-liner
 
+**Linux / macOS:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/reddb-io/dictator/main/install.sh | bash
 ```
 
-Detects your OS/arch, downloads the matching binary from the latest release, verifies its
-`.sha256`, and drops it in `~/.local/bin`. Options:
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/reddb-io/dictator/main/install.ps1 | iex
+```
+
+Each detects your OS/arch, downloads the matching binary from the latest release, verifies its
+`.sha256`, installs it (`~/.local/bin` on Unix, `%LOCALAPPDATA%\Programs\dictator` on Windows),
+and puts it on your `PATH`. Options:
 
 ```bash
 # pin a version, or change the install dir
