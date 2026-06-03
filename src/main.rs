@@ -9,6 +9,7 @@ mod audio;
 mod config;
 mod inject;
 mod notify;
+mod output;
 mod transcribe;
 
 use std::sync::Arc;

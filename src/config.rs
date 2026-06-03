@@ -46,6 +46,10 @@ pub struct Cli {
     #[arg(long, default_value = "global")]
     pub region: String,
 
+    /// Disable the live terminal preview of partial transcripts.
+    #[arg(long)]
+    pub no_preview: bool,
+
     /// Path to a dotenv-style file holding `ELEVENLABS_API_KEY`.
     /// Defaults to `~/.dictator.env`.
     #[arg(long)]
@@ -68,6 +72,7 @@ pub struct Config {
     pub keyterms: Vec<String>,
     pub vad_silence: f64,
     pub region: String,
+    pub no_preview: bool,
 }
 
 /// Target sample rate sent to the API (Scribe expects 16 kHz mono s16le).
@@ -110,6 +115,7 @@ impl Config {
             keyterms: cli.keyterms.clone(),
             vad_silence: cli.vad_silence,
             region: cli.region.clone(),
+            no_preview: cli.no_preview,
         })
     }
 

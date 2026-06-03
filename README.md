@@ -114,6 +114,7 @@ Press **F9** → speak → press **F9** again. `Ctrl+C` quits. Crank up logs wit
 | `--keyterm <TERM>` | — | Bias the model toward a term; repeatable |
 | `--vad-silence <SECS>` | `1.5` | Silence before a segment commits — lower = snappier |
 | `--region` | `global` | API region: `global`, `us`, `eu`, `in` |
+| `--no-preview` | off | Disable the live terminal preview |
 | `--env-file` | `~/.dictator.env` | Path to the key file |
 | `--list-devices` | — | Print input devices and exit |
 
@@ -123,6 +124,24 @@ Press **F9** → speak → press **F9** again. `Ctrl+C` quits. Crank up logs wit
 > sentence to land sooner at the cost of slightly more fragmentation.
 
 ---
+
+## Nothing gets lost
+
+Two surfaces keep your words safe without ever risking the focused app's text:
+
+- **Live terminal preview** — the unstable `partial_transcript` "materializes" on a
+  single, self-rewriting line in your terminal. You watch the sentence form in real time,
+  but the app in focus **only ever receives committed (finalized) text**. No backspace-and-
+  retype into a window we don't control, so there's no way to clobber what's already there.
+- **Append-only transcript log** — every committed segment is written to
+  `~/.dictator/sessions/session-<ts>.txt`. If a paste fails, the app loses focus, or the
+  connection drops, the text is still on disk. A previewed tail that never got a final commit
+  is recorded too (marked `# [uncommitted]`) — saved for recovery, **not** pasted late.
+
+```
+… materializing this senten     ← live preview (dim, rewrites in place)
+This sentence is now committed.  ← locked in, pasted into the app + logged
+```
 
 ## How it works
 

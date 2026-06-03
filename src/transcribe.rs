@@ -27,6 +27,7 @@ use crate::audio::{self, Resampler};
 use crate::config::{Config, CHUNK_MS, FINAL_WAIT_SECS, SAMPLE_RATE};
 use crate::inject::Injector;
 use crate::notify::notify;
+use crate::output::{Preview, SessionLog};
 
 /// Run one dictation session until `stop` is notified, then drain and close.
 pub async fn run_session(cfg: Config, injector: Injector, stop: Arc<Notify>) -> Result<()> {
@@ -51,8 +52,15 @@ pub async fn run_session(cfg: Config, injector: Injector, stop: Arc<Notify>) -> 
     info!("session started (mic {native_rate} Hz)");
 
     // --- receiver: paste committed segments ---
+    let preview_enabled = !cfg.no_preview;
     let recv = tokio::spawn(async move {
+        let mut preview = Preview::new(preview_enabled);
+        let mut log = SessionLog::open();
         let mut last_committed = String::new();
+        // The latest previewed segment that has NOT yet been committed. A
+        // non-empty value when the loop exits is a tail we never got a commit
+        // for — recovered to the log (not pasted, to avoid a late clobber).
+        let mut pending = String::new();
         while let Some(frame) = read.next().await {
             let raw = match frame {
                 Ok(Message::Text(raw)) => raw,
@@ -84,18 +92,29 @@ pub async fn run_session(cfg: Config, injector: Injector, stop: Arc<Notify>) -> 
                 // the committed segment under `text`.
                 "committed_transcript" | "committed_transcript_with_timestamps" => {
                     let text = evt.get("text").and_then(Value::as_str).unwrap_or("").trim();
+                    // This segment is now committed, so the previewed tail is
+                    // accounted for — drop it from the recovery buffer.
+                    pending.clear();
                     if text.is_empty() || text == last_committed {
                         continue;
                     }
                     last_committed = text.to_string();
                     injector.paste(format!("{text} "));
-                    info!("committed: {text}");
+                    log.committed(text);
+                    if preview.enabled {
+                        preview.commit(text);
+                    } else {
+                        info!("committed: {text}");
+                    }
                 }
-                // Unstable preview — ignored on purpose (typing it char-by-char
-                // would scramble output); surfaced only at debug level.
+                // Unstable preview — never pasted into the app (typing it
+                // char-by-char would scramble output). Shown live in the
+                // terminal and held as the recovery tail until it commits.
                 "partial_transcript" => {
-                    if let Some(t) = evt.get("text").and_then(Value::as_str) {
-                        debug!("partial: {t}");
+                    let t = evt.get("text").and_then(Value::as_str).unwrap_or("").trim();
+                    if !t.is_empty() {
+                        pending = t.to_string();
+                        preview.partial(t);
                     }
                 }
                 "session_started" => {
@@ -124,6 +143,13 @@ pub async fn run_session(cfg: Config, injector: Injector, stop: Arc<Notify>) -> 
                 }
                 other => debug!("unhandled message: {other} {evt}"),
             }
+        }
+        preview.clear();
+        // A previewed tail that never committed: save it so nothing said is
+        // lost, but don't paste it (the app may no longer be focused).
+        if !pending.is_empty() {
+            warn!("recovering uncommitted tail to log: {pending}");
+            log.uncommitted(&pending);
         }
         injector.restore();
     });
