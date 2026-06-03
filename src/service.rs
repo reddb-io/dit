@@ -322,9 +322,9 @@ fn status() -> Result<()> {
     Ok(())
 }
 
-// ── Shared helpers (Unix-flavoured ExecStart line) ───────────────────────────
+// ── Linux ExecStart/Exec line ────────────────────────────────────────────────
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn exec_line(args: &[String]) -> Result<String> {
     let exe = exe_path()?;
     let mut line = exe;
