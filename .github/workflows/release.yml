@@ -6,8 +6,8 @@ on:
       - 'v*.*.*'
   workflow_dispatch:
     inputs:
-      tag:
-        description: Tag to build (e.g. v0.1.0). Must already exist.
+      version:
+        description: Version to release, e.g. 0.1.0 (must match Cargo.toml)
         required: true
 
 permissions:
@@ -22,8 +22,63 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  plan:
+    name: Plan release
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      should_skip: ${{ steps.plan.outputs.should_skip }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      package_version: ${{ steps.plan.outputs.package_version }}
+      github_prerelease: ${{ steps.plan.outputs.github_prerelease }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Decide release target
+        id: plan
+        run: |
+          set -euo pipefail
+          EVENT="${{ github.event_name }}"
+          REF="${{ github.ref }}"
+          INPUT_VERSION="${{ github.event.inputs.version || '' }}"
+          SHOULD_SKIP=false
+          RELEASE_TAG=""
+          PACKAGE_VERSION=""
+
+          if [[ "$EVENT" == "push" && "$REF" == refs/tags/v* ]]; then
+            RELEASE_TAG="${REF#refs/tags/}"
+            PACKAGE_VERSION="${RELEASE_TAG#v}"
+          elif [[ "$EVENT" == "workflow_dispatch" ]]; then
+            [[ -n "$INPUT_VERSION" ]] || { echo "version input is required"; exit 1; }
+            PACKAGE_VERSION="${INPUT_VERSION#v}"
+            RELEASE_TAG="v${PACKAGE_VERSION}"
+          else
+            SHOULD_SKIP=true
+          fi
+
+          # Release-blocking guard: the crate version must match the tag, so a
+          # published binary's `--version` always equals its release tag.
+          if [[ "$SHOULD_SKIP" != "true" ]]; then
+            CRATE_VERSION="$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)"
+            if [[ "$CRATE_VERSION" != "$PACKAGE_VERSION" ]]; then
+              echo "::error::Tag ${RELEASE_TAG} resolves to ${PACKAGE_VERSION}, but Cargo.toml is ${CRATE_VERSION}."
+              echo "Bump 'version' in Cargo.toml to ${PACKAGE_VERSION}, commit, then re-tag."
+              exit 1
+            fi
+          fi
+
+          {
+            echo "should_skip=${SHOULD_SKIP}"
+            echo "release_tag=${RELEASE_TAG}"
+            echo "package_version=${PACKAGE_VERSION}"
+            echo "github_prerelease=false"
+          } >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.asset_name }}
+    needs: [plan]
+    if: needs.plan.outputs.should_skip != 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     continue-on-error: ${{ matrix.optional == true }}
@@ -41,7 +96,7 @@ jobs:
           # Windows x86_64.
           - { os: windows-latest, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, cross: false, optional: true }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -52,7 +107,7 @@ jobs:
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libdbus-1-dev pkg-config
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
 
@@ -84,7 +139,7 @@ jobs:
           EXT=""; [[ "${{ matrix.target }}" == *windows* ]] && EXT=".exe"
           ./"dit-${{ matrix.asset_name }}${EXT}" --version
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset_name }}
           path: |
@@ -92,41 +147,35 @@ jobs:
 
   publish-github:
     name: GitHub Release
-    needs: [build]
+    needs: [plan, build]
+    if: needs.plan.outputs.should_skip != 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # git-cliff walks the full history to build the changelog.
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: release
           merge-multiple: true
-
-      - name: Resolve tag
-        id: tag
-        run: |
-          TAG="${{ github.event.inputs.tag }}"
-          [ -z "$TAG" ] && TAG="${GITHUB_REF_NAME}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Generate changelog from commits
         uses: orhun/git-cliff-action@v4
         id: changelog
         with:
           config: cliff.toml
-          args: --unreleased --tag ${{ steps.tag.outputs.tag }} --strip header
+          args: --unreleased --tag ${{ needs.plan.outputs.release_tag }} --strip header
         env:
           OUTPUT: release-changelog.md
           GITHUB_REPO: ${{ github.repository }}
 
       - name: Compose release body
         env:
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.plan.outputs.release_tag }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -134,7 +183,7 @@ jobs:
           cat > release-body.md <<MARKDOWN
           # dit ${TAG}
 
-          Push-to-toggle voice dictation — speak, and the transcript lands in the focused app.
+          Push-to-toggle voice dictation — speak, and the transcript is typed into the focused app.
 
           ${CHANGELOG}
 
@@ -186,10 +235,11 @@ jobs:
           cat release-body.md
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: dit ${{ steps.tag.outputs.tag }}
+          tag_name: ${{ needs.plan.outputs.release_tag }}
+          name: dit ${{ needs.plan.outputs.release_tag }}
           body_path: release-body.md
+          prerelease: ${{ needs.plan.outputs.github_prerelease }}
           files: release/*
           token: ${{ secrets.GITHUB_TOKEN }}
