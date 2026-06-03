@@ -1,0 +1,37 @@
+[package]
+name = "dictator"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform push-to-toggle voice dictation via ElevenLabs Scribe v2 Realtime — speak, and the transcript is pasted into whatever app is focused."
+license = "MIT"
+repository = "https://github.com/filipeforattini/dictator"
+readme = "README.md"
+keywords = ["dictation", "speech-to-text", "elevenlabs", "voice", "accessibility"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[[bin]]
+name = "dictator"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+cpal = "0.15"
+arboard = "3"
+enigo = "0.2"
+rdev = "0.5"
+notify-rust = "4"
+anyhow = "1"
+dirs = "5"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
