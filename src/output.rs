@@ -20,7 +20,7 @@ pub struct Preview {
 
 impl Preview {
     /// Enabled only when previews are wanted *and* stdout is a real terminal
-    /// (so piping `dictator > file` doesn't get ANSI control codes).
+    /// (so piping `dit > file` doesn't get ANSI control codes).
     pub fn new(want: bool) -> Self {
         Self {
             enabled: want && std::io::stdout().is_terminal(),
@@ -59,7 +59,7 @@ impl Preview {
     }
 }
 
-/// Append-only transcript file for the session, under `~/.dictator/sessions/`.
+/// Append-only transcript file for the session, under `~/.dit/sessions/`.
 pub struct SessionLog {
     file: Option<File>,
 }
@@ -77,7 +77,7 @@ impl SessionLog {
     }
 
     fn try_open() -> Option<(String, File)> {
-        let dir = dirs::home_dir()?.join(".dictator").join("sessions");
+        let dir = dirs::home_dir()?.join(".dit").join("sessions");
         fs::create_dir_all(&dir).ok()?;
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -89,7 +89,7 @@ impl SessionLog {
             .append(true)
             .open(&path)
             .ok()?;
-        let _ = writeln!(f, "# dictator session — unix_ms={stamp}");
+        let _ = writeln!(f, "# dit session — unix_ms={stamp}");
         Some((path.display().to_string(), f))
     }
 

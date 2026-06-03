@@ -1,19 +1,19 @@
-# dictator installer (Windows / PowerShell)
+# dit installer (Windows / PowerShell)
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/reddb-io/dictator/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/reddb-io/dit/main/install.ps1 | iex
 #
 #   # pin a version or change the install dir:
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/reddb-io/dictator/main/install.ps1))) -Version v0.1.0
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/reddb-io/dit/main/install.ps1))) -Version v0.1.0
 
 [CmdletBinding()]
 param(
     [string]$Version = "",
-    [string]$InstallDir = "$env:LOCALAPPDATA\Programs\dictator"
+    [string]$InstallDir = "$env:LOCALAPPDATA\Programs\dit"
 )
 
 $ErrorActionPreference = "Stop"
-$Repo = "reddb-io/dictator"
+$Repo = "reddb-io/dit"
 
 function Info($m) { Write-Host "› $m" -ForegroundColor Cyan }
 function Warn($m) { Write-Host "! $m" -ForegroundColor Yellow }
@@ -24,12 +24,12 @@ if ($osArch -eq "Arm64") {
     Warn "Windows on ARM detected; using the x86_64 build (runs under emulation)."
 }
 # We currently ship a single Windows asset.
-$asset = "dictator-windows-x86_64.exe"
+$asset = "dit-windows-x86_64.exe"
 
 # --- resolve the release tag -----------------------------------------------
 if ([string]::IsNullOrEmpty($Version)) {
     Info "resolving latest release…"
-    $headers = @{ "User-Agent" = "dictator-install" }
+    $headers = @{ "User-Agent" = "dit-install" }
     $rel = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest" -Headers $headers
     $tag = $rel.tag_name
 } else {
@@ -40,7 +40,7 @@ if ([string]::IsNullOrEmpty($tag)) { throw "Could not determine a release tag fo
 # --- download ---------------------------------------------------------------
 $url = "https://github.com/$Repo/releases/download/$tag/$asset"
 $tmp = New-TemporaryFile
-Info "installing dictator $tag (windows-x86_64)"
+Info "installing dit $tag (windows-x86_64)"
 Invoke-WebRequest $url -OutFile $tmp -UseBasicParsing
 
 # --- verify checksum (skips if sidecar missing) -----------------------------
@@ -62,7 +62,7 @@ if ($sumLine) {
 
 # --- install ----------------------------------------------------------------
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-$dest = Join-Path $InstallDir "dictator.exe"
+$dest = Join-Path $InstallDir "dit.exe"
 Move-Item -Force $tmp $dest
 Info "installed → $dest"
 
@@ -76,5 +76,5 @@ if ($userPath -notlike "*$InstallDir*") {
 Write-Host ""
 Write-Host "✓ done" -ForegroundColor Green
 Write-Host "Next:"
-Write-Host "  'ELEVENLABS_API_KEY=sk_your_key_here' | Out-File -Encoding ascii `"$env:USERPROFILE\.dictator.env`""
-Write-Host "  dictator --help     # press F9 to start/stop dictation"
+Write-Host "  'ELEVENLABS_API_KEY=sk_your_key_here' | Out-File -Encoding ascii `"$env:USERPROFILE\.dit.env`""
+Write-Host "  dit --help     # press F9 to start/stop dictation"

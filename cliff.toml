@@ -21,7 +21,7 @@ body = """
 {% endfor %}
 {% endfor -%}
 {% if previous and previous.version %}
-**Full Changelog**: https://github.com/reddb-io/dictator/compare/{{ previous.version }}...{{ version }}
+**Full Changelog**: https://github.com/reddb-io/dit/compare/{{ previous.version }}...{{ version }}
 {% endif %}
 """
 

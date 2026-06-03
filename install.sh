@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# dictator installer
+# dit installer
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/reddb-io/dictator/main/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/reddb-io/dictator/main/install.sh | bash -s -- --version v0.1.0
-#   curl -fsSL https://raw.githubusercontent.com/reddb-io/dictator/main/install.sh | bash -s -- --install-dir /usr/local/bin
+#   curl -fsSL https://raw.githubusercontent.com/reddb-io/dit/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/reddb-io/dit/main/install.sh | bash -s -- --version v0.1.0
+#   curl -fsSL https://raw.githubusercontent.com/reddb-io/dit/main/install.sh | bash -s -- --install-dir /usr/local/bin
 #
 set -euo pipefail
 
-REPO="reddb-io/dictator"
+REPO="reddb-io/dit"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
-BINARY_NAME="dictator"
+BINARY_NAME="dit"
 VERSION=""
 
 while [[ $# -gt 0 ]]; do
@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
     --install-dir)  INSTALL_DIR="$2"; shift 2 ;;
     -h|--help)
       cat <<EOF
-dictator installer
+dit installer
 
 Usage: install.sh [OPTIONS]
 
@@ -145,7 +145,7 @@ This platform may not have a prebuilt binary — build from source instead (see 
 
   printf '\n\033[1;32m✓ done\033[0m\n'
   echo "Next:"
-  echo "  echo 'ELEVENLABS_API_KEY=sk_your_key_here' > ~/.dictator.env"
+  echo "  echo 'ELEVENLABS_API_KEY=sk_your_key_here' > ~/.dit.env"
   echo "  ${BINARY_NAME} --help     # press F9 to start/stop dictation"
 }
 

@@ -1,7 +1,7 @@
 /target
 **/*.rs.bk
 *.pdb
-.dictator.env
+.dit.env
 .DS_Store
 
 # stray tooling state

@@ -1,10 +1,10 @@
-//! A single dictation session: capture -> Scribe v2 Realtime WebSocket -> paste.
+//! A single dictation session: capture -> Scribe v2 Realtime WebSocket -> type.
 //!
 //! Faithful to the original `whisperflow.py` semantics:
 //!
 //!   * `partial_transcript`   → ignored (unstable preview).
-//!   * `committed_transcript` → stable per-segment text; pasted immediately.
-//!   * content dedup          → the same segment is never pasted twice.
+//!   * `committed_transcript` → stable per-segment text; typed immediately.
+//!   * content dedup          → the same segment is never typed twice.
 //!
 //! On stop, an empty `commit: true` frame flushes the final segment, then we
 //! keep reading for `FINAL_WAIT_SECS` to catch trailing commits.
@@ -31,8 +31,6 @@ use crate::output::{Preview, SessionLog};
 
 /// Run one dictation session until `stop` is notified, then drain and close.
 pub async fn run_session(cfg: Config, injector: Injector, stop: Arc<Notify>) -> Result<()> {
-    injector.save();
-
     // --- microphone capture on its own thread ---
     let audio_stop = Arc::new(AtomicBool::new(false));
     let (samples_tx, mut samples_rx) = mpsc::unbounded_channel::<Vec<f32>>();
@@ -99,7 +97,7 @@ pub async fn run_session(cfg: Config, injector: Injector, stop: Arc<Notify>) -> 
                         continue;
                     }
                     last_committed = text.to_string();
-                    injector.paste(format!("{text} "));
+                    injector.type_text(format!("{text} "));
                     log.committed(text);
                     if preview.enabled {
                         preview.commit(text);
@@ -138,7 +136,7 @@ pub async fn run_session(cfg: Config, injector: Injector, stop: Arc<Notify>) -> 
                 | "transcriber_error" => {
                     let msg = detail();
                     warn!("scribe error [{mtype}]: {msg}");
-                    notify("dictator — STT error", &format!("{mtype}: {msg}"));
+                    notify("dit — STT error", &format!("{mtype}: {msg}"));
                     break;
                 }
                 other => debug!("unhandled message: {other} {evt}"),
@@ -146,12 +144,11 @@ pub async fn run_session(cfg: Config, injector: Injector, stop: Arc<Notify>) -> 
         }
         preview.clear();
         // A previewed tail that never committed: save it so nothing said is
-        // lost, but don't paste it (the app may no longer be focused).
+        // lost, but don't type it (the app may no longer be focused).
         if !pending.is_empty() {
             warn!("recovering uncommitted tail to log: {pending}");
             log.uncommitted(&pending);
         }
-        injector.restore();
     });
 
     // --- sender: stream audio until stopped, then flush a final commit ---

@@ -15,7 +15,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  BINARY_NAME: dictator
+  BINARY_NAME: dit
 
 concurrency:
   group: release-${{ github.workflow }}-${{ github.ref }}
@@ -62,18 +62,18 @@ jobs:
           cache-on-failure: "true"
 
       - name: Build
-        run: cargo build --locked --release --target ${{ matrix.target }} --bin dictator
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin dit
 
       - name: Strip (Linux native)
         if: runner.os == 'Linux'
-        run: strip target/${{ matrix.target }}/release/dictator
+        run: strip target/${{ matrix.target }}/release/dit
 
       - name: Package asset
         shell: bash
         run: |
           EXT=""; [[ "${{ matrix.target }}" == *windows* ]] && EXT=".exe"
-          ASSET="dictator-${{ matrix.asset_name }}${EXT}"
-          cp "target/${{ matrix.target }}/release/dictator${EXT}" "${ASSET}"
+          ASSET="dit-${{ matrix.asset_name }}${EXT}"
+          cp "target/${{ matrix.target }}/release/dit${EXT}" "${ASSET}"
           shasum -a 256 "${ASSET}" > "${ASSET}.sha256" 2>/dev/null \
             || certutil -hashfile "${ASSET}" SHA256 > "${ASSET}.sha256"
 
@@ -82,13 +82,13 @@ jobs:
         shell: bash
         run: |
           EXT=""; [[ "${{ matrix.target }}" == *windows* ]] && EXT=".exe"
-          ./"dictator-${{ matrix.asset_name }}${EXT}" --version
+          ./"dit-${{ matrix.asset_name }}${EXT}" --version
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
           path: |
-            dictator-${{ matrix.asset_name }}*
+            dit-${{ matrix.asset_name }}*
 
   publish-github:
     name: GitHub Release
@@ -132,7 +132,7 @@ jobs:
           set -euo pipefail
           CHANGELOG="$(cat release-changelog.md)"
           cat > release-body.md <<MARKDOWN
-          # dictator ${TAG}
+          # dit ${TAG}
 
           Push-to-toggle voice dictation — speak, and the transcript lands in the focused app.
 
@@ -156,31 +156,31 @@ jobs:
 
           **Linux (x86_64):**
           \`\`\`bash
-          curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/dictator-linux-x86_64 -o dictator && chmod +x dictator
+          curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/dit-linux-x86_64 -o dit && chmod +x dit
           \`\`\`
 
           **Linux (aarch64):**
           \`\`\`bash
-          curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/dictator-linux-aarch64 -o dictator && chmod +x dictator
+          curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/dit-linux-aarch64 -o dit && chmod +x dit
           \`\`\`
 
           **macOS (Apple Silicon):**
           \`\`\`bash
-          curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/dictator-macos-aarch64 -o dictator && chmod +x dictator
-          xattr -d com.apple.quarantine dictator   # clear Gatekeeper
+          curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/dit-macos-aarch64 -o dit && chmod +x dit
+          xattr -d com.apple.quarantine dit   # clear Gatekeeper
           \`\`\`
 
-          **macOS (Intel):** \`dictator-macos-x86_64\` · **Windows:** \`dictator-windows-x86_64.exe\`
+          **macOS (Intel):** \`dit-macos-x86_64\` · **Windows:** \`dit-windows-x86_64.exe\`
 
-          Each asset ships a \`.sha256\` sidecar — verify with \`shasum -a 256 -c dictator-<asset>.sha256\`.
+          Each asset ships a \`.sha256\` sidecar — verify with \`shasum -a 256 -c dit-<asset>.sha256\`.
 
           ## Configure
 
           \`\`\`bash
-          echo 'ELEVENLABS_API_KEY=sk_your_key_here' > ~/.dictator.env
+          echo 'ELEVENLABS_API_KEY=sk_your_key_here' > ~/.dit.env
           \`\`\`
 
-          Run \`dictator\`, press **F9**, speak, press **F9** again. See the [README](https://github.com/${REPO}#readme) for platform notes.
+          Run \`dit\`, press **F9**, speak, press **F9** again. See the [README](https://github.com/${REPO}#readme) for platform notes.
           MARKDOWN
           echo "---- composed body ----"
           cat release-body.md
@@ -189,7 +189,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
-          name: dictator ${{ steps.tag.outputs.tag }}
+          name: dit ${{ steps.tag.outputs.tag }}
           body_path: release-body.md
           files: release/*
           token: ${{ secrets.GITHUB_TOKEN }}

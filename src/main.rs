@@ -1,4 +1,4 @@
-//! dictator — cross-platform push-to-toggle voice dictation.
+//! dit — cross-platform push-to-toggle voice dictation.
 //!
 //! Press the hotkey (F9 by default) to start a session: speak, and each stable
 //! transcript segment is pasted into whatever window is focused. Press it again
@@ -35,7 +35,7 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "dictator=info".into()),
+                .unwrap_or_else(|_| "dit=info".into()),
         )
         .init();
 
@@ -74,7 +74,7 @@ fn main() -> Result<()> {
     if let Err(e) = result {
         error!("keyboard listener failed: {e:?}");
         notify::notify(
-            "dictator error",
+            "dit error",
             "Could not capture the keyboard. On Linux ensure X11 access or run with the right permissions; on macOS grant Accessibility.",
         );
         std::process::exit(1);

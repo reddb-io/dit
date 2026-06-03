@@ -1,17 +1,17 @@
 [package]
-name = "dictator"
+name = "dit"
 version = "0.1.0"
 edition = "2021"
 description = "Cross-platform push-to-toggle voice dictation via ElevenLabs Scribe v2 Realtime — speak, and the transcript is pasted into whatever app is focused."
 authors = ["RedDB.io"]
 license = "MIT"
-repository = "https://github.com/reddb-io/dictator"
+repository = "https://github.com/reddb-io/dit"
 readme = "README.md"
 keywords = ["dictation", "speech-to-text", "elevenlabs", "voice", "accessibility"]
 categories = ["command-line-utilities", "multimedia::audio"]
 
 [[bin]]
-name = "dictator"
+name = "dit"
 path = "src/main.rs"
 
 [dependencies]
@@ -22,7 +22,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 cpal = "0.15"
-arboard = "3"
 enigo = "0.2"
 rdev = "0.5"
 notify-rust = "4"

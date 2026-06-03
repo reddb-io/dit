@@ -1,7 +1,7 @@
 //! Configuration: CLI flags, env-file loading and the derived runtime settings.
 //!
 //! Mirrors `whisperflow.py`'s config block: it reads `ELEVENLABS_API_KEY` from a
-//! dotenv-style file (default `~/.dictator.env`) or the process environment, and
+//! dotenv-style file (default `~/.dit.env`) or the process environment, and
 //! exposes the model/language/hotkey knobs.
 
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use rdev::Key;
 
 /// Cross-platform voice dictation via ElevenLabs Scribe v2 Realtime.
 #[derive(Parser, Debug)]
-#[command(name = "dictator", version, about)]
+#[command(name = "dit", version, about)]
 pub struct Cli {
     /// Language code passed to Scribe (e.g. `pt`, `en`, `es`).
     #[arg(long, default_value = "pt")]
@@ -51,7 +51,7 @@ pub struct Cli {
     pub no_preview: bool,
 
     /// Path to a dotenv-style file holding `ELEVENLABS_API_KEY`.
-    /// Defaults to `~/.dictator.env`.
+    /// Defaults to `~/.dit.env`.
     #[arg(long)]
     pub env_file: Option<PathBuf>,
 
@@ -87,7 +87,7 @@ impl Config {
         let env_path = cli
             .env_file
             .clone()
-            .or_else(|| dirs::home_dir().map(|h| h.join(".dictator.env")));
+            .or_else(|| dirs::home_dir().map(|h| h.join(".dit.env")));
         if let Some(path) = &env_path {
             load_env_file(path);
         }
@@ -98,7 +98,7 @@ impl Config {
                 "ELEVENLABS_API_KEY is not set. Put it in {} or export it in the environment.",
                 env_path
                     .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "~/.dictator.env".into())
+                    .unwrap_or_else(|| "~/.dit.env".into())
             );
         }
 

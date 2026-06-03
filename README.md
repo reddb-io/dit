@@ -1,12 +1,12 @@
 <p align="center">
-  <h1 align="center">🎙️ dictator</h1>
+  <h1 align="center">🎙️ dit</h1>
   <p align="center"><strong>Push-to-toggle voice dictation for your whole desktop.</strong></p>
   <p align="center">Hit a key. Talk. The words land in whatever app is focused. Hit it again to stop.</p>
 </p>
 
 <p align="center">
-  <a href="https://github.com/reddb-io/dictator/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/reddb-io/dictator/ci.yml?style=flat-square&label=CI" alt="CI"></a>
-  <a href="https://github.com/reddb-io/dictator/releases"><img src="https://img.shields.io/github/v/release/reddb-io/dictator?style=flat-square" alt="Release"></a>
+  <a href="https://github.com/reddb-io/dit/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/reddb-io/dit/ci.yml?style=flat-square&label=CI" alt="CI"></a>
+  <a href="https://github.com/reddb-io/dit/releases"><img src="https://img.shields.io/github/v/release/reddb-io/dit?style=flat-square" alt="Release"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
   <img src="https://img.shields.io/badge/platforms-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-informational?style=flat-square" alt="Platforms">
   <img src="https://img.shields.io/badge/built%20with-Rust-orange?style=flat-square&logo=rust" alt="Rust">
@@ -14,7 +14,7 @@
 
 ---
 
-`dictator` streams your microphone to [ElevenLabs **Scribe v2 Realtime**](https://elevenlabs.io/docs/api-reference/speech-to-text)
+`dit` streams your microphone to [ElevenLabs **Scribe v2 Realtime**](https://elevenlabs.io/docs/api-reference/speech-to-text)
 and pastes each finalized sentence into the focused window the instant it's ready — no app
 to switch to, no transcript window to copy out of. It's a single static binary, written in
 Rust, that runs the same way on **Linux, macOS and Windows**.
@@ -29,7 +29,7 @@ a Linux/Wayland-only Python script. This is the portable, dependency-light rewri
                                                   │
                        committed_transcript ◄─────┘
                                   │
-                  clipboard  ──►  Ctrl/⌘+V  ──►  ✶ focused app
+                       typed as keystrokes  ──►  ✶ focused app
 ```
 
 ---
@@ -40,16 +40,16 @@ a Linux/Wayland-only Python script. This is the portable, dependency-light rewri
 
 **Linux / macOS:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/reddb-io/dictator/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/reddb-io/dit/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-irm https://raw.githubusercontent.com/reddb-io/dictator/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/reddb-io/dit/main/install.ps1 | iex
 ```
 
 Each detects your OS/arch, downloads the matching binary from the latest release, verifies its
-`.sha256`, installs it (`~/.local/bin` on Unix, `%LOCALAPPDATA%\Programs\dictator` on Windows),
+`.sha256`, installs it (`~/.local/bin` on Unix, `%LOCALAPPDATA%\Programs\dit` on Windows),
 and puts it on your `PATH`. Options:
 
 ```bash
@@ -60,22 +60,22 @@ curl -fsSL .../install.sh | bash -s -- --install-dir /usr/local/bin
 
 ### Manual download
 
-Grab the binary for your platform from the [**Releases**](https://github.com/reddb-io/dictator/releases) page:
+Grab the binary for your platform from the [**Releases**](https://github.com/reddb-io/dit/releases) page:
 
 | Platform | Asset |
 |---|---|
-| Linux x86_64 | `dictator-linux-x86_64` |
-| Linux aarch64 | `dictator-linux-aarch64` |
-| macOS Apple Silicon | `dictator-macos-aarch64` |
-| macOS Intel | `dictator-macos-x86_64` |
-| Windows x86_64 | `dictator-windows-x86_64.exe` |
+| Linux x86_64 | `dit-linux-x86_64` |
+| Linux aarch64 | `dit-linux-aarch64` |
+| macOS Apple Silicon | `dit-macos-aarch64` |
+| macOS Intel | `dit-macos-x86_64` |
+| Windows x86_64 | `dit-windows-x86_64.exe` |
 
 ```bash
-curl -fsSL https://github.com/reddb-io/dictator/releases/latest/download/dictator-linux-x86_64 -o dictator
-chmod +x dictator && sudo mv dictator /usr/local/bin/
+curl -fsSL https://github.com/reddb-io/dit/releases/latest/download/dit-linux-x86_64 -o dit
+chmod +x dit && sudo mv dit /usr/local/bin/
 ```
 
-Every asset ships a `.sha256` sidecar — verify with `shasum -a 256 -c dictator-<asset>.sha256`.
+Every asset ships a `.sha256` sidecar — verify with `shasum -a 256 -c dit-<asset>.sha256`.
 
 > [!NOTE]
 > The prebuilt Linux binary is dynamically linked. Install its runtime libs once:
@@ -104,10 +104,10 @@ macOS and Windows need no extra system packages.
 
 ## Configure
 
-Put your ElevenLabs API key in `~/.dictator.env`:
+Put your ElevenLabs API key in `~/.dit.env`:
 
 ```bash
-echo 'ELEVENLABS_API_KEY=sk_your_key_here' > ~/.dictator.env
+echo 'ELEVENLABS_API_KEY=sk_your_key_here' > ~/.dit.env
 ```
 
 (or export `ELEVENLABS_API_KEY`, or pass `--env-file <path>`).
@@ -117,18 +117,18 @@ echo 'ELEVENLABS_API_KEY=sk_your_key_here' > ~/.dictator.env
 ## Use
 
 ```bash
-dictator                              # F9 toggle, Portuguese
-dictator --language en                # English
-dictator --hotkey F8                  # any of F1..F12
-dictator --device "Fifine"            # prefer an input device by name substring
-dictator --no-filler                  # strip "uh"/"um" from the output
-dictator --keyterm RedDB --keyterm Scribe   # bias toward names/jargon (repeatable)
-dictator --vad-silence 0.8            # commit faster on shorter pauses
-dictator --region eu                  # EU data residency
-dictator --list-devices               # list inputs and exit
+dit                              # F9 toggle, Portuguese
+dit --language en                # English
+dit --hotkey F8                  # any of F1..F12
+dit --device "Fifine"            # prefer an input device by name substring
+dit --no-filler                  # strip "uh"/"um" from the output
+dit --keyterm RedDB --keyterm Scribe   # bias toward names/jargon (repeatable)
+dit --vad-silence 0.8            # commit faster on shorter pauses
+dit --region eu                  # EU data residency
+dit --list-devices               # list inputs and exit
 ```
 
-Press **F9** → speak → press **F9** again. `Ctrl+C` quits. Crank up logs with `RUST_LOG=dictator=debug`.
+Press **F9** → speak → press **F9** again. `Ctrl+C` quits. Crank up logs with `RUST_LOG=dit=debug`.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -141,7 +141,7 @@ Press **F9** → speak → press **F9** again. `Ctrl+C` quits. Crank up logs wit
 | `--vad-silence <SECS>` | `1.5` | Silence before a segment commits — lower = snappier |
 | `--region` | `global` | API region: `global`, `us`, `eu`, `in` |
 | `--no-preview` | off | Disable the live terminal preview |
-| `--env-file` | `~/.dictator.env` | Path to the key file |
+| `--env-file` | `~/.dit.env` | Path to the key file |
 | `--list-devices` | — | Print input devices and exit |
 
 > [!TIP]
@@ -160,34 +160,36 @@ Two surfaces keep your words safe without ever risking the focused app's text:
   but the app in focus **only ever receives committed (finalized) text**. No backspace-and-
   retype into a window we don't control, so there's no way to clobber what's already there.
 - **Append-only transcript log** — every committed segment is written to
-  `~/.dictator/sessions/session-<ts>.txt`. If a paste fails, the app loses focus, or the
+  `~/.dit/sessions/session-<ts>.txt`. If typing fails, the app loses focus, or the
   connection drops, the text is still on disk. A previewed tail that never got a final commit
-  is recorded too (marked `# [uncommitted]`) — saved for recovery, **not** pasted late.
+  is recorded too (marked `# [uncommitted]`) — saved for recovery, **not** typed late.
 
 ```
 … materializing this senten     ← live preview (dim, rewrites in place)
-This sentence is now committed.  ← locked in, pasted into the app + logged
+This sentence is now committed.  ← locked in, typed into the app + logged
 ```
 
 ## How it works
 
-`dictator` is faithful to the original script's streaming contract:
+`dit` is faithful to the original script's streaming contract:
 
 - **`partial_transcript`** events are **ignored** — they're an unstable preview, and typing
   them character-by-character would scramble the output.
 - **`committed_transcript`** events are stable per-segment text, committed by the server's
-  Voice Activity Detection on each pause. Every one is **pasted immediately**.
+  Voice Activity Detection on each pause. Every one is **typed into the focused app immediately**.
 - Identical consecutive segments are **de-duplicated** so nothing lands twice.
-- On stop, an empty `commit: true` frame **flushes the last open segment**, then the
-  clipboard is **restored** to whatever you had before.
+- On stop, an empty `commit: true` frame **flushes the last open segment**.
+
+Text is **typed as keystrokes**, not pasted via the clipboard — paste bindings aren't universal
+(terminals use `Ctrl+Shift+V`, most apps use `Ctrl+V`), so no single shortcut works everywhere.
+Typing lands in anything that accepts keyboard input and never touches your clipboard.
 
 | Concern | Crate | Replaces (`whisperflow.py`) |
 |---|---|---|
 | Global hotkey | [`rdev`](https://crates.io/crates/rdev) | `evdev` + `input` group |
 | Audio capture | [`cpal`](https://crates.io/crates/cpal) | `parec` (PulseAudio) |
 | WebSocket | [`tokio-tungstenite`](https://crates.io/crates/tokio-tungstenite) | `websockets` |
-| Clipboard | [`arboard`](https://crates.io/crates/arboard) | `wl-copy` / `wl-paste` |
-| Paste keystroke | [`enigo`](https://crates.io/crates/enigo) | `ydotool key ctrl+v` |
+| Text injection | [`enigo`](https://crates.io/crates/enigo) | `wl-copy` + `ydotool key ctrl+v` |
 | Notifications | [`notify-rust`](https://crates.io/crates/notify-rust) | `notify-send` |
 
 ---
@@ -202,7 +204,7 @@ This sentence is now committed.  ← locked in, pasted into the app + logged
 
 > [!NOTE]
 > **macOS** — grant **Accessibility** permission (System Settings → Privacy & Security →
-> Accessibility) so `dictator` can read the hotkey and send the paste keystroke. The paste
+> Accessibility) so `dit` can read the hotkey and send the paste keystroke. The paste
 > modifier is automatically **⌘** instead of Ctrl.
 >
 > **Windows** — works out of the box.
