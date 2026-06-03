@@ -36,7 +36,22 @@ a Linux/Wayland-only Python script. This is the portable, dependency-light rewri
 
 ## Install
 
-### Download a release
+### One-liner (Linux / macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/reddb-io/dictator/main/install.sh | bash
+```
+
+Detects your OS/arch, downloads the matching binary from the latest release, verifies its
+`.sha256`, and drops it in `~/.local/bin`. Options:
+
+```bash
+# pin a version, or change the install dir
+curl -fsSL .../install.sh | bash -s -- --version v0.1.0
+curl -fsSL .../install.sh | bash -s -- --install-dir /usr/local/bin
+```
+
+### Manual download
 
 Grab the binary for your platform from the [**Releases**](https://github.com/reddb-io/dictator/releases) page:
 
@@ -54,6 +69,10 @@ chmod +x dictator && sudo mv dictator /usr/local/bin/
 ```
 
 Every asset ships a `.sha256` sidecar — verify with `shasum -a 256 -c dictator-<asset>.sha256`.
+
+> [!NOTE]
+> The prebuilt Linux binary is dynamically linked. Install its runtime libs once:
+> `sudo apt-get install -y libasound2 libxdo3 libxtst6 libxi6 libdbus-1-3`. macOS and Windows need nothing extra.
 
 ### Build from source
 

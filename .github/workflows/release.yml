@@ -142,7 +142,12 @@ jobs:
 
           ## Install
 
-          Download the binary for your platform, make it executable, and put it on your \`PATH\`.
+          **One-liner (Linux / macOS):**
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | bash
+          \`\`\`
+
+          Or download a binary directly, make it executable, and put it on your \`PATH\`:
 
           **Linux (x86_64):**
           \`\`\`bash
