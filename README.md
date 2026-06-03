@@ -227,9 +227,8 @@ commits (feat:/fix:/…) ─► release-plz PR ─► merge ─► tag vX.Y.Z �
 ```
 
 So you never tag by hand — just write conventional commits and merge the release PR. **No PAT
-needed:** a tag pushed by the bot's `GITHUB_TOKEN` won't trigger another workflow (GitHub's
-anti-recursion rule), so the release-plz job instead dispatches the release build via
-`workflow_dispatch` — the one event that *is* allowed to fire from `GITHUB_TOKEN`.
+needed:** the tag release-plz creates triggers the build directly (you can also rebuild any tag
+manually with `gh workflow run release.yml -f version=X.Y.Z`).
 
 ---
 
