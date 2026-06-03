@@ -1,0 +1,43 @@
+name: release-plz
+
+# Commit-driven semver. release-plz reads the Conventional Commits on main and
+# opens a "release" PR that bumps Cargo.toml + CHANGELOG.md. Merging that PR
+# creates the version tag, which triggers release.yml (binary builds + GitHub
+# Release). Versioning lives here; building/publishing lives in release.yml —
+# the same split reddb uses between changesets.yml and release.yml.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-plz-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  release-plz:
+    name: Version from commits
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Full history so release-plz can diff against the last tag.
+          fetch-depth: 0
+          # A PAT lets the tag release-plz pushes re-trigger release.yml — a tag
+          # pushed with the default GITHUB_TOKEN does NOT trigger other
+          # workflows. Falls back to GITHUB_TOKEN (tag is created, but you must
+          # then run release.yml manually via workflow_dispatch).
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          config: release-plz.toml
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}

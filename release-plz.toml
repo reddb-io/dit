@@ -1,0 +1,21 @@
+# release-plz drives semver from Conventional Commits.
+#
+# On every push to main it opens/updates a "release" PR that bumps the crate
+# version from the commits since the last tag (feat → minor, fix → patch,
+# `!`/`BREAKING CHANGE` → major) and regenerates CHANGELOG.md. Merging that PR
+# creates the version tag; the tag triggers release.yml, which builds the
+# binaries and publishes the GitHub Release.
+
+[workspace]
+# We don't publish to crates.io.
+publish = false
+# release.yml owns the GitHub Release (it attaches the built binaries), so
+# release-plz must NOT create one…
+git_release_enable = false
+# …but it MUST create the git tag — that tag is what triggers release.yml.
+git_tag_enable = true
+# Keep CHANGELOG.md in sync as part of the release PR.
+changelog_update = true
+# Use the same git-cliff config as release.yml's body, so the CHANGELOG and the
+# release notes are rendered identically from the same commits.
+changelog_config = "cliff.toml"

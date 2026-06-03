@@ -198,14 +198,13 @@ Typing lands in anything that accepts keyboard input and never touches your clip
 
 > [!IMPORTANT]
 > **Linux / Wayland** restricts global key-grabbing and synthetic input for security.
-> Capture and paste may be limited depending on your compositor — running under **X11 /
-> XWayland** is the reliable path. (The original script worked around this with `ydotool`
-> and the `input` group.) On **X11**, everything works out of the box.
+> Hotkey capture and typing may be limited depending on your compositor — running under
+> **X11 / XWayland** is the reliable path. (The original script worked around this with
+> `ydotool` and the `input` group.) On **X11**, everything works out of the box.
 
 > [!NOTE]
 > **macOS** — grant **Accessibility** permission (System Settings → Privacy & Security →
-> Accessibility) so `dit` can read the hotkey and send the paste keystroke. The paste
-> modifier is automatically **⌘** instead of Ctrl.
+> Accessibility) so `dit` can read the hotkey and type into the focused app.
 >
 > **Windows** — works out of the box.
 
@@ -213,14 +212,23 @@ Typing lands in anything that accepts keyboard input and never touches your clip
 
 ## Releases & CI
 
-Tag-driven, built on [Blacksmith](https://blacksmith.sh) runners — Linux x86_64/aarch64 compile
-**natively** (no QEMU/cross), macOS ships universal coverage and Windows an `.exe`. Pushing a
-`v*.*.*` tag builds every target, attaches the binaries plus `.sha256` sidecars, and renders the
-changelog from conventional commits via [`git-cliff`](https://git-cliff.org).
+Versioning is **commit-driven**. [`release-plz`](https://release-plz.dev) reads the
+[Conventional Commits](https://www.conventionalcommits.org) on `main` and opens a *release PR*
+that bumps the version (`feat` → minor, `fix` → patch, `!`/`BREAKING CHANGE` → major) and updates
+`CHANGELOG.md`. Merging that PR creates the version tag.
 
-```bash
-git tag v0.1.0 && git push origin v0.1.0   # → builds, smoke-tests, publishes the GitHub Release
+The tag triggers the release build on [Blacksmith](https://blacksmith.sh) runners — Linux
+x86_64/aarch64 compile **natively** (no QEMU/cross), macOS ships universal coverage, Windows an
+`.exe`. Every target is built `--locked`, stripped, smoke-tested, and published to a GitHub Release
+with `.sha256` sidecars and a [`git-cliff`](https://git-cliff.org) changelog.
+
 ```
+commits (feat:/fix:/…) ─► release-plz PR ─► merge ─► tag vX.Y.Z ─► binaries + GitHub Release
+```
+
+So you never tag by hand — just write conventional commits and merge the release PR. (CI requires a
+`RELEASE_PAT` secret so the bot's tag can trigger the build; without it the tag is still created and
+you can run the release workflow manually.)
 
 ---
 
