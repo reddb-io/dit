@@ -23,14 +23,12 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::{ClientRequestBuilder, Message};
 use tracing::{debug, info, warn};
 
-use tao::event_loop::EventLoopProxy;
-
 use crate::audio::{self, Resampler};
 use crate::config::{Config, CHUNK_MS, FINAL_WAIT_SECS, SAMPLE_RATE};
 use crate::inject::Injector;
 use crate::notify::notify;
 use crate::output::{Preview, SessionLog};
-use crate::{IconState, UserEvent};
+use crate::IconState;
 
 /// Run one dictation session and report the tray state around it: Recording
 /// while live, then Idle on a clean close or Error if it failed.
@@ -38,16 +36,15 @@ pub async fn run_session(
     cfg: Config,
     injector: Injector,
     stop: Arc<Notify>,
-    proxy: EventLoopProxy<UserEvent>,
+    state: mpsc::UnboundedSender<IconState>,
 ) -> Result<()> {
-    let _ = proxy.send_event(UserEvent::SetState(IconState::Recording));
+    let _ = state.send(IconState::Recording);
     let result = session_inner(cfg, injector, stop).await;
-    let state = if result.is_ok() {
+    let _ = state.send(if result.is_ok() {
         IconState::Idle
     } else {
         IconState::Error
-    };
-    let _ = proxy.send_event(UserEvent::SetState(state));
+    });
     result
 }
 

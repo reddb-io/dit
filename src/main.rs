@@ -5,11 +5,15 @@
 //! to stop. A tray icon shows the state (idle / recording / error) and offers a
 //! menu to toggle and quit.
 //!
-//! The main thread runs a `tao` event loop hosting the global hotkey and the
-//! tray icon (both need the platform event loop); audio capture and the
-//! WebSocket run on a background Tokio runtime. State changes flow back to the
-//! loop through an `EventLoopProxy` so the tray icon can be updated on the main
-//! thread.
+//! The tray differs by platform to keep dependencies minimal:
+//!
+//! - Linux uses `ksni` (a pure-Rust D-Bus StatusNotifierItem) — no GTK — and
+//!   the global hotkey runs on its own thread, so the main thread just polls.
+//! - macOS/Windows use `tray-icon` + a `tao` event loop on the main thread,
+//!   which those platforms require for tray + global hotkey.
+//!
+//! Audio capture and the WebSocket always run on a background Tokio runtime;
+//! session state flows back over a `std::sync::mpsc` channel to drive the icon.
 
 mod audio;
 mod config;
@@ -20,25 +24,20 @@ mod service;
 mod transcribe;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
-use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use tao::event::Event;
-use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
-use tokio::sync::mpsc::{self, UnboundedReceiver};
+use global_hotkey::{hotkey::HotKey, GlobalHotKeyManager};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIconBuilder};
+use tracing::{error, info};
 
 use config::{Cli, Command, Config};
 use inject::Injector;
 use transcribe::run_session;
 
-/// Control messages from the UI loop to the async session manager.
+/// Control messages from the UI to the async session manager.
 pub enum Control {
     Toggle,
 }
@@ -49,12 +48,6 @@ pub enum IconState {
     Idle,
     Recording,
     Error,
-}
-
-/// Events delivered to the main `tao` loop from background tasks.
-#[derive(Debug)]
-pub enum UserEvent {
-    SetState(IconState),
 }
 
 fn main() -> Result<()> {
@@ -77,95 +70,26 @@ fn main() -> Result<()> {
     let injector = Injector::spawn()?;
 
     // Background Tokio runtime for audio + the WebSocket. Kept alive for the
-    // whole program (the event loop below never returns).
+    // whole program (the UI below never returns).
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
-    // Main-thread event loop hosting the hotkey and the tray icon.
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
-    let proxy = event_loop.create_proxy();
-
-    let (tx, rx) = mpsc::unbounded_channel::<Control>();
-    rt.spawn(manager(cfg.clone(), injector, rx, proxy));
-
-    // Global hotkey.
-    let hotkey_manager = GlobalHotKeyManager::new()?;
-    let hotkey = HotKey::new(None, cfg.hotkey);
-    if let Err(e) = hotkey_manager.register(hotkey) {
-        warn!("could not register the hotkey: {e}");
-        notify::notify(
-            "dit — hotkey unavailable",
-            "Another app may have grabbed the key. On Linux/Wayland use an X11 session.",
-        );
-    }
-    let hotkey_id = hotkey.id();
-
-    // Tray icon + menu.
-    let menu = Menu::new();
-    let toggle_item = MenuItem::new("Start / stop dictation", true, None);
-    let quit_item = MenuItem::new("Quit dit", true, None);
-    menu.append(&toggle_item).ok();
-    menu.append(&PredefinedMenuItem::separator()).ok();
-    menu.append(&quit_item).ok();
-    let toggle_id = toggle_item.id().clone();
-    let quit_id = quit_item.id().clone();
-
-    let tray = TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
-        .with_tooltip("dit — idle")
-        .with_icon(make_icon(IconState::Idle))
-        .build()?;
-
-    info!("ready — press the hotkey (or use the tray) to start/stop dictation");
-
-    let hotkey_rx = GlobalHotKeyEvent::receiver();
-    let menu_rx = MenuEvent::receiver();
-
-    // `tao`'s run never returns; `rt`, `tray` and `hotkey_manager` are moved/kept
-    // alive for the program's lifetime.
-    event_loop.run(move |event, _, control_flow| {
-        // Keep `hotkey_manager` alive inside the loop.
-        let _ = &hotkey_manager;
-        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100));
-
-        if let Ok(ev) = hotkey_rx.try_recv() {
-            if ev.id == hotkey_id && ev.state == HotKeyState::Pressed {
-                let _ = tx.send(Control::Toggle);
-            }
-        }
-        if let Ok(ev) = menu_rx.try_recv() {
-            if ev.id == toggle_id {
-                let _ = tx.send(Control::Toggle);
-            } else if ev.id == quit_id {
-                *control_flow = ControlFlow::Exit;
-            }
-        }
-        if let Event::UserEvent(UserEvent::SetState(state)) = event {
-            let tip = match state {
-                IconState::Idle => "dit — idle",
-                IconState::Recording => "dit — recording",
-                IconState::Error => "dit — error",
-            };
-            let _ = tray.set_icon(Some(make_icon(state)));
-            let _ = tray.set_tooltip(Some(tip));
-        }
-    });
+    run_ui(cfg, injector, rt)
 }
 
 /// Owns the lifecycle of the current session and toggles it on each request.
+/// `run_session` reports the Idle/Recording/Error state itself over `state_tx`.
 async fn manager(
     cfg: Config,
     injector: Injector,
     mut rx: UnboundedReceiver<Control>,
-    proxy: EventLoopProxy<UserEvent>,
+    state_tx: UnboundedSender<IconState>,
 ) {
     let mut current: Option<(Arc<Notify>, JoinHandle<Result<()>>)> = None;
 
     while let Some(Control::Toggle) = rx.recv().await {
         match current.take() {
-            // An active, still-running session → stop it. run_session reports the
-            // resulting Idle/Error state itself.
             Some((stop, handle)) if !handle.is_finished() => {
                 stop.notify_one();
                 tokio::spawn(async move {
@@ -174,14 +98,13 @@ async fn manager(
                     }
                 });
             }
-            // No session (or it already ended) → start a fresh one.
             _ => {
                 let stop = Arc::new(Notify::new());
                 let handle = tokio::spawn(run_session(
                     cfg.clone(),
                     injector.clone(),
                     stop.clone(),
-                    proxy.clone(),
+                    state_tx.clone(),
                 ));
                 current = Some((stop, handle));
             }
@@ -189,8 +112,8 @@ async fn manager(
     }
 }
 
-/// Build a 32×32 RGBA disc icon for the given state.
-fn make_icon(state: IconState) -> Icon {
+/// Build a 32×32 RGBA disc for the given state.
+fn disc_rgba(state: IconState) -> (Vec<u8>, u32) {
     let (r, g, b) = match state {
         IconState::Idle => (0x9e, 0x9e, 0x9e),
         IconState::Recording => (0xe5, 0x39, 0x35),
@@ -219,5 +142,208 @@ fn make_icon(state: IconState) -> Icon {
             rgba[i + 3] = alpha;
         }
     }
-    Icon::from_rgba(rgba, S as u32, S as u32).expect("valid RGBA icon")
+    (rgba, S as u32)
+}
+
+fn tooltip(state: IconState) -> &'static str {
+    match state {
+        IconState::Idle => "dit — idle",
+        IconState::Recording => "dit — recording",
+        IconState::Error => "dit — error",
+    }
+}
+
+// ── Linux: ksni (D-Bus) tray + hotkey poll loop, no GTK ──────────────────────
+
+#[cfg(target_os = "linux")]
+struct DitTray {
+    state: IconState,
+    tx: tokio::sync::mpsc::UnboundedSender<Control>,
+}
+
+#[cfg(target_os = "linux")]
+impl ksni::Tray for DitTray {
+    fn id(&self) -> String {
+        "io.reddb.dit".into()
+    }
+    fn title(&self) -> String {
+        tooltip(self.state).into()
+    }
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        let (mut data, size) = disc_rgba(self.state);
+        // ksni wants ARGB32; disc_rgba gives RGBA → rotate each pixel right.
+        for px in data.chunks_exact_mut(4) {
+            px.rotate_right(1);
+        }
+        vec![ksni::Icon {
+            width: size as i32,
+            height: size as i32,
+            data,
+        }]
+    }
+    fn activate(&mut self, _x: i32, _y: i32) {
+        let _ = self.tx.send(Control::Toggle);
+    }
+    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        use ksni::menu::*;
+        vec![
+            StandardItem {
+                label: "Start / stop dictation".into(),
+                activate: Box::new(|t: &mut DitTray| {
+                    let _ = t.tx.send(Control::Toggle);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            StandardItem {
+                label: "Quit dit".into(),
+                activate: Box::new(|_| std::process::exit(0)),
+                ..Default::default()
+            }
+            .into(),
+        ]
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Result<()> {
+    use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
+
+    let (tx, rx) = mpsc::unbounded_channel::<Control>();
+    let (state_tx, mut state_rx) = mpsc::unbounded_channel::<IconState>();
+    rt.spawn(manager(cfg.clone(), injector, rx, state_tx));
+
+    let hotkey_manager = GlobalHotKeyManager::new()?;
+    let hotkey = HotKey::new(None, cfg.hotkey);
+    if let Err(e) = hotkey_manager.register(hotkey) {
+        tracing::warn!("could not register the hotkey: {e}");
+        notify::notify(
+            "dit — hotkey unavailable",
+            "Another app may have grabbed the key. On Wayland use an X11 session.",
+        );
+    }
+    let hotkey_id = hotkey.id();
+
+    // Run the ksni (D-Bus) tray on the Tokio runtime and drive its icon from
+    // session state. ksni's default runtime is Tokio, so the async API fits.
+    let tray_tx = tx.clone();
+    rt.spawn(async move {
+        use ksni::TrayMethods;
+        let handle = match (DitTray {
+            state: IconState::Idle,
+            tx: tray_tx,
+        })
+        .spawn()
+        .await
+        {
+            Ok(h) => h,
+            Err(e) => {
+                error!("could not start the tray: {e}");
+                return;
+            }
+        };
+        while let Some(state) = state_rx.recv().await {
+            let _ = handle.update(move |t: &mut DitTray| t.state = state).await;
+        }
+    });
+
+    info!("ready — press the hotkey (or use the tray) to start/stop dictation");
+
+    // The global hotkey runs on its own thread; just poll its channel.
+    let hotkey_rx = GlobalHotKeyEvent::receiver();
+    loop {
+        while let Ok(ev) = hotkey_rx.try_recv() {
+            if ev.id == hotkey_id && ev.state == HotKeyState::Pressed {
+                let _ = tx.send(Control::Toggle);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+// ── macOS/Windows: tray-icon + tao event loop ────────────────────────────────
+
+#[cfg(not(target_os = "linux"))]
+#[derive(Debug)]
+enum UserEvent {
+    SetState(IconState),
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Result<()> {
+    use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
+    use std::time::{Duration, Instant};
+    use tao::event::Event;
+    use tao::event_loop::{ControlFlow, EventLoopBuilder};
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::{Icon, TrayIconBuilder};
+
+    let (tx, rx) = mpsc::unbounded_channel::<Control>();
+    let (state_tx, mut state_rx) = mpsc::unbounded_channel::<IconState>();
+    rt.spawn(manager(cfg.clone(), injector, rx, state_tx));
+
+    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    let proxy = event_loop.create_proxy();
+
+    // Forward session state into the event loop.
+    rt.spawn(async move {
+        while let Some(state) = state_rx.recv().await {
+            let _ = proxy.send_event(UserEvent::SetState(state));
+        }
+    });
+
+    let hotkey_manager = GlobalHotKeyManager::new()?;
+    let hotkey = HotKey::new(None, cfg.hotkey);
+    if let Err(e) = hotkey_manager.register(hotkey) {
+        tracing::warn!("could not register the hotkey: {e}");
+    }
+    let hotkey_id = hotkey.id();
+
+    let make_icon = |state: IconState| -> Icon {
+        let (rgba, size) = disc_rgba(state);
+        Icon::from_rgba(rgba, size, size).expect("valid RGBA icon")
+    };
+
+    let menu = Menu::new();
+    let toggle_item = MenuItem::new("Start / stop dictation", true, None);
+    let quit_item = MenuItem::new("Quit dit", true, None);
+    menu.append(&toggle_item).ok();
+    menu.append(&PredefinedMenuItem::separator()).ok();
+    menu.append(&quit_item).ok();
+    let toggle_id = toggle_item.id().clone();
+    let quit_id = quit_item.id().clone();
+
+    let tray = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_tooltip(tooltip(IconState::Idle))
+        .with_icon(make_icon(IconState::Idle))
+        .build()?;
+
+    info!("ready — press the hotkey (or use the tray) to start/stop dictation");
+
+    let hotkey_rx = GlobalHotKeyEvent::receiver();
+    let menu_rx = MenuEvent::receiver();
+
+    event_loop.run(move |event, _, control_flow| {
+        let _ = &hotkey_manager;
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100));
+
+        if let Ok(ev) = hotkey_rx.try_recv() {
+            if ev.id == hotkey_id && ev.state == HotKeyState::Pressed {
+                let _ = tx.send(Control::Toggle);
+            }
+        }
+        if let Ok(ev) = menu_rx.try_recv() {
+            if ev.id == toggle_id {
+                let _ = tx.send(Control::Toggle);
+            } else if ev.id == quit_id {
+                *control_flow = ControlFlow::Exit;
+            }
+        }
+        if let Event::UserEvent(UserEvent::SetState(state)) = event {
+            let _ = tray.set_icon(Some(make_icon(state)));
+            let _ = tray.set_tooltip(Some(tooltip(state)));
+        }
+    });
 }

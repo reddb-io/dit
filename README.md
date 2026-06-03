@@ -48,14 +48,18 @@ curl -fsSL https://raw.githubusercontent.com/reddb-io/dit/main/install.sh | bash
 irm https://raw.githubusercontent.com/reddb-io/dit/main/install.ps1 | iex
 ```
 
-Each detects your OS/arch, downloads the matching binary from the latest release, verifies its
-`.sha256`, installs it (`~/.local/bin` on Unix, `%LOCALAPPDATA%\Programs\dit` on Windows),
-and puts it on your `PATH`. Options:
+The installer detects your OS/arch, downloads the matching binary, verifies its `.sha256`, installs
+it (`~/.local/bin` on Unix, `%LOCALAPPDATA%\Programs\dit` on Windows) and puts it on your `PATH`.
+It then walks you through the rest interactively: **prompts for your ElevenLabs API key**, offers to
+**install the runtime libraries** (detecting apt/dnf/pacman/zypper), and offers to **set up the
+autostart service** — then smoke-tests that the binary runs.
 
 ```bash
-# pin a version, or change the install dir
+# fully non-interactive, e.g. for provisioning
+curl -fsSL .../install.sh | bash -s -- --yes --api-key sk_... --with-service
+# other flags
 curl -fsSL .../install.sh | bash -s -- --version v0.1.0
-curl -fsSL .../install.sh | bash -s -- --install-dir /usr/local/bin
+curl -fsSL .../install.sh | bash -s -- --install-dir /usr/local/bin --skip-deps --no-service
 ```
 
 ### Manual download
@@ -79,8 +83,8 @@ Every asset ships a `.sha256` sidecar — verify with `shasum -a 256 -c dit-<ass
 
 > [!NOTE]
 > The prebuilt Linux binary is dynamically linked. Install its runtime libs once:
-> `sudo apt-get install -y libasound2 libxdo3 libxtst6 libxi6 libdbus-1-3 libgtk-3-0 libayatana-appindicator3-1`.
-> macOS and Windows need nothing extra.
+> `sudo apt-get install -y libasound2 libxdo3 libxtst6 libxi6` (the one-liner installer does this for
+> you). macOS and Windows need nothing extra.
 
 ### Build from source
 
@@ -93,11 +97,10 @@ cargo install --path .          # or: cargo build --release
 
 ```bash
 sudo apt-get install -y \
-  libasound2-dev libxdo-dev libxi-dev libxtst-dev \
-  libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-  libgtk-3-dev libayatana-appindicator3-dev \
-  libdbus-1-dev pkg-config
+  libasound2-dev libxdo-dev libxi-dev libxtst-dev libdbus-1-dev pkg-config
 ```
+
+(The Linux tray uses a pure-Rust D-Bus client — no GTK or appindicator needed.)
 
 macOS and Windows need no extra system packages.
 </details>

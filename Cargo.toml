@@ -29,11 +29,18 @@ dirs = "5"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tao = "0.35.3"
-tray-icon = "0.24.0"
 global-hotkey = "0.8.0"
 
 [profile.release]
 opt-level = 3
 lto = true
 strip = true
+
+# Linux: a pure-Rust D-Bus tray (no GTK/appindicator dependency).
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = "0.3.4"
+
+# macOS/Windows: the GTK-free native tray needs the platform event loop.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tao = "0.35.3"
+tray-icon = "0.24.0"
