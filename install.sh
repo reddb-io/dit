@@ -141,8 +141,8 @@ This platform may not have a prebuilt binary — build from source instead (see 
 
   # Linux runtime libraries the dynamically-linked binary needs.
   if [[ "$OS" == "linux" ]]; then
-    warn "Linux runtime libs required: libasound2, libxdo3, libxtst6, libxi6, libdbus-1-3 (Debian/Ubuntu):
-      sudo apt-get install -y libasound2 libxdo3 libxtst6 libxi6 libdbus-1-3"
+    warn "Linux runtime libs required (Debian/Ubuntu):
+      sudo apt-get install -y libasound2 libxdo3 libxtst6 libxi6 libdbus-1-3 libgtk-3-0 libayatana-appindicator3-1"
   fi
 
   printf '\n\033[1;32m✓ done\033[0m\n'

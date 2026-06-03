@@ -79,7 +79,8 @@ Every asset ships a `.sha256` sidecar — verify with `shasum -a 256 -c dit-<ass
 
 > [!NOTE]
 > The prebuilt Linux binary is dynamically linked. Install its runtime libs once:
-> `sudo apt-get install -y libasound2 libxdo3 libxtst6 libxi6 libdbus-1-3`. macOS and Windows need nothing extra.
+> `sudo apt-get install -y libasound2 libxdo3 libxtst6 libxi6 libdbus-1-3 libgtk-3-0 libayatana-appindicator3-1`.
+> macOS and Windows need nothing extra.
 
 ### Build from source
 
@@ -94,6 +95,7 @@ cargo install --path .          # or: cargo build --release
 sudo apt-get install -y \
   libasound2-dev libxdo-dev libxi-dev libxtst-dev \
   libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+  libgtk-3-dev libayatana-appindicator3-dev \
   libdbus-1-dev pkg-config
 ```
 

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use rdev::Key;
+use global_hotkey::hotkey::Code;
 
 /// Cross-platform voice dictation via ElevenLabs Scribe v2 Realtime.
 #[derive(Parser, Debug)]
@@ -93,7 +93,7 @@ pub struct Config {
     pub api_key: String,
     pub language: String,
     pub model: String,
-    pub hotkey: Key,
+    pub hotkey: Code,
     pub device: Option<String>,
     pub no_filler: bool,
     pub keyterms: Vec<String>,
@@ -218,21 +218,21 @@ fn load_env_file(path: &PathBuf) {
     }
 }
 
-/// Parse function-key names into `rdev::Key`.
-fn parse_hotkey(name: &str) -> Result<Key> {
+/// Parse function-key names into a `global_hotkey` key code.
+fn parse_hotkey(name: &str) -> Result<Code> {
     let key = match name.to_ascii_uppercase().as_str() {
-        "F1" => Key::F1,
-        "F2" => Key::F2,
-        "F3" => Key::F3,
-        "F4" => Key::F4,
-        "F5" => Key::F5,
-        "F6" => Key::F6,
-        "F7" => Key::F7,
-        "F8" => Key::F8,
-        "F9" => Key::F9,
-        "F10" => Key::F10,
-        "F11" => Key::F11,
-        "F12" => Key::F12,
+        "F1" => Code::F1,
+        "F2" => Code::F2,
+        "F3" => Code::F3,
+        "F4" => Code::F4,
+        "F5" => Code::F5,
+        "F6" => Code::F6,
+        "F7" => Code::F7,
+        "F8" => Code::F8,
+        "F9" => Code::F9,
+        "F10" => Code::F10,
+        "F11" => Code::F11,
+        "F12" => Code::F12,
         other => bail!("only F1..F12 are supported, got {other}"),
     };
     Ok(key)

@@ -23,14 +23,36 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::{ClientRequestBuilder, Message};
 use tracing::{debug, info, warn};
 
+use tao::event_loop::EventLoopProxy;
+
 use crate::audio::{self, Resampler};
 use crate::config::{Config, CHUNK_MS, FINAL_WAIT_SECS, SAMPLE_RATE};
 use crate::inject::Injector;
 use crate::notify::notify;
 use crate::output::{Preview, SessionLog};
+use crate::{IconState, UserEvent};
+
+/// Run one dictation session and report the tray state around it: Recording
+/// while live, then Idle on a clean close or Error if it failed.
+pub async fn run_session(
+    cfg: Config,
+    injector: Injector,
+    stop: Arc<Notify>,
+    proxy: EventLoopProxy<UserEvent>,
+) -> Result<()> {
+    let _ = proxy.send_event(UserEvent::SetState(IconState::Recording));
+    let result = session_inner(cfg, injector, stop).await;
+    let state = if result.is_ok() {
+        IconState::Idle
+    } else {
+        IconState::Error
+    };
+    let _ = proxy.send_event(UserEvent::SetState(state));
+    result
+}
 
 /// Run one dictation session until `stop` is notified, then drain and close.
-pub async fn run_session(cfg: Config, injector: Injector, stop: Arc<Notify>) -> Result<()> {
+async fn session_inner(cfg: Config, injector: Injector, stop: Arc<Notify>) -> Result<()> {
     // --- microphone capture on its own thread ---
     let audio_stop = Arc::new(AtomicBool::new(false));
     let (samples_tx, mut samples_rx) = mpsc::unbounded_channel::<Vec<f32>>();
