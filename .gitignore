@@ -3,3 +3,6 @@
 *.pdb
 .dictator.env
 .DS_Store
+
+# stray tooling state
+.red/
