@@ -70,7 +70,9 @@ detect_platform() {
 
   PLATFORM="${OS}-${ARCH}"
   EXT=""
-  [[ "$OS" == "windows" ]] && EXT=".exe"
+  # NOTE: a bare `[[ … ]] && EXT=…` as the function's last statement would make
+  # the function return non-zero on non-Windows and trip `set -e`. Use `if`.
+  if [[ "$OS" == "windows" ]]; then EXT=".exe"; fi
 }
 
 # --- resolve the release tag ------------------------------------------------
@@ -127,7 +129,7 @@ This platform may not have a prebuilt binary — build from source instead (see 
   local dest="${INSTALL_DIR}/${BINARY_NAME}${EXT}"
   mv "$tmp" "$dest"
   trap - EXIT
-  [[ "$OS" != "windows" ]] && chmod +x "$dest"
+  if [[ "$OS" != "windows" ]]; then chmod +x "$dest"; fi
   say "installed → ${dest}"
 
   # PATH hint
