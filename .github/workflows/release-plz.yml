@@ -2,17 +2,22 @@ name: release-plz
 
 # Commit-driven semver. release-plz reads the Conventional Commits on main and
 # opens a "release" PR that bumps Cargo.toml + CHANGELOG.md. Merging that PR
-# creates the version tag, which triggers release.yml (binary builds + GitHub
-# Release). Versioning lives here; building/publishing lives in release.yml —
-# the same split reddb uses between changesets.yml and release.yml.
+# creates the version tag. Versioning lives here; building/publishing lives in
+# release.yml — the same split reddb uses between changesets.yml and release.yml.
+#
+# No PAT needed: a tag pushed with the default GITHUB_TOKEN does NOT trigger
+# other workflows (GitHub's anti-recursion rule), so instead of relying on the
+# tag's `push` event we explicitly dispatch release.yml below — `workflow_dispatch`
+# is the documented exception that IS allowed to fire from GITHUB_TOKEN.
 
 on:
   push:
     branches: [main]
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: write       # create the version tag + commit the changelog
+  pull-requests: write  # open/update the release PR
+  actions: write        # dispatch release.yml for the new tag
 
 concurrency:
   group: release-plz-${{ github.workflow }}
@@ -27,17 +32,26 @@ jobs:
         with:
           # Full history so release-plz can diff against the last tag.
           fetch-depth: 0
-          # A PAT lets the tag release-plz pushes re-trigger release.yml — a tag
-          # pushed with the default GITHUB_TOKEN does NOT trigger other
-          # workflows. Falls back to GITHUB_TOKEN (tag is created, but you must
-          # then run release.yml manually via workflow_dispatch).
-          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
 
       - uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Run release-plz
+        id: release-plz
         uses: release-plz/action@v0.5
         with:
           config: release-plz.toml
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build binaries for the freshly-tagged release
+        if: steps.release-plz.outputs.releases_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          echo "$RELEASES" | jq -c '.[]' | while read -r rel; do
+            tag="$(jq -r '.tag' <<<"$rel")"
+            version="$(jq -r '.version' <<<"$rel")"
+            echo "→ dispatching release.yml for ${tag} (version ${version})"
+            gh workflow run release.yml --ref "${tag}" -f version="${version}"
+          done

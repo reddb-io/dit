@@ -226,9 +226,10 @@ with `.sha256` sidecars and a [`git-cliff`](https://git-cliff.org) changelog.
 commits (feat:/fix:/…) ─► release-plz PR ─► merge ─► tag vX.Y.Z ─► binaries + GitHub Release
 ```
 
-So you never tag by hand — just write conventional commits and merge the release PR. (CI requires a
-`RELEASE_PAT` secret so the bot's tag can trigger the build; without it the tag is still created and
-you can run the release workflow manually.)
+So you never tag by hand — just write conventional commits and merge the release PR. **No PAT
+needed:** a tag pushed by the bot's `GITHUB_TOKEN` won't trigger another workflow (GitHub's
+anti-recursion rule), so the release-plz job instead dispatches the release build via
+`workflow_dispatch` — the one event that *is* allowed to fire from `GITHUB_TOKEN`.
 
 ---
 
