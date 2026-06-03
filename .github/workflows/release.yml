@@ -2,29 +2,44 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build (e.g. v0.1.0). Must already exist.
+        required: true
 
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: dictator
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
-    name: ${{ matrix.target }}
+    name: Build ${{ matrix.asset_name }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    continue-on-error: ${{ matrix.optional == true }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-          - os: macos-latest
-            target: x86_64-apple-darwin
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          # Linux x86_64: native compile on a Blacksmith 8-vCPU runner.
+          - { os: blacksmith-8vcpu-ubuntu-2404,     target: x86_64-unknown-linux-gnu,  asset_name: linux-x86_64,  cross: false }
+          # Linux aarch64: build natively on a Blacksmith ARM runner (no cross gcc).
+          - { os: blacksmith-8vcpu-ubuntu-2404-arm, target: aarch64-unknown-linux-gnu, asset_name: linux-aarch64, cross: false }
+          # macOS: native ARM, cross-built Intel from the same ARM pool.
+          - { os: macos-14,       target: aarch64-apple-darwin,  asset_name: macos-aarch64,  cross: false, optional: true }
+          - { os: macos-14,       target: x86_64-apple-darwin,   asset_name: macos-x86_64,   cross: true,  smoke: false, optional: true }
+          # Windows x86_64.
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, cross: false, optional: true }
     steps:
       - uses: actions/checkout@v4
 
@@ -36,35 +51,135 @@ jobs:
             libasound2-dev libxdo-dev libxi-dev libxtst-dev \
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libdbus-1-dev pkg-config
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu
-            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+          cache-on-failure: "true"
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin dictator
 
-      - name: Package (unix)
-        if: runner.os != 'Windows'
+      - name: Strip (Linux native)
+        if: runner.os == 'Linux'
+        run: strip target/${{ matrix.target }}/release/dictator
+
+      - name: Package asset
+        shell: bash
         run: |
-          bin=target/${{ matrix.target }}/release/dictator
-          tar -czf dictator-${{ matrix.target }}.tar.gz -C "$(dirname "$bin")" dictator
+          EXT=""; [[ "${{ matrix.target }}" == *windows* ]] && EXT=".exe"
+          ASSET="dictator-${{ matrix.asset_name }}${EXT}"
+          cp "target/${{ matrix.target }}/release/dictator${EXT}" "${ASSET}"
+          shasum -a 256 "${ASSET}" > "${ASSET}.sha256" 2>/dev/null \
+            || certutil -hashfile "${ASSET}" SHA256 > "${ASSET}.sha256"
 
-      - name: Package (windows)
-        if: runner.os == 'Windows'
+      - name: Smoke test
+        if: ${{ !matrix.cross && matrix.smoke != false }}
+        shell: bash
         run: |
-          Compress-Archive -Path target/${{ matrix.target }}/release/dictator.exe -DestinationPath dictator-${{ matrix.target }}.zip
+          EXT=""; [[ "${{ matrix.target }}" == *windows* ]] && EXT=".exe"
+          ./"dictator-${{ matrix.asset_name }}${EXT}" --version
 
-      - name: Upload to release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: |
+            dictator-${{ matrix.asset_name }}*
+
+  publish-github:
+    name: GitHub Release
+    needs: [build]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # git-cliff walks the full history to build the changelog.
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          [ -z "$TAG" ] && TAG="${GITHUB_REF_NAME}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Generate changelog from commits
+        uses: orhun/git-cliff-action@v4
+        id: changelog
+        with:
+          config: cliff.toml
+          args: --unreleased --tag ${{ steps.tag.outputs.tag }} --strip header
+        env:
+          OUTPUT: release-changelog.md
+          GITHUB_REPO: ${{ github.repository }}
+
+      - name: Compose release body
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          CHANGELOG="$(cat release-changelog.md)"
+          cat > release-body.md <<MARKDOWN
+          # dictator ${TAG}
+
+          Push-to-toggle voice dictation — speak, and the transcript lands in the focused app.
+
+          ${CHANGELOG}
+
+          ---
+
+          ## Install
+
+          Download the binary for your platform, make it executable, and put it on your \`PATH\`.
+
+          **Linux (x86_64):**
+          \`\`\`bash
+          curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/dictator-linux-x86_64 -o dictator && chmod +x dictator
+          \`\`\`
+
+          **Linux (aarch64):**
+          \`\`\`bash
+          curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/dictator-linux-aarch64 -o dictator && chmod +x dictator
+          \`\`\`
+
+          **macOS (Apple Silicon):**
+          \`\`\`bash
+          curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/dictator-macos-aarch64 -o dictator && chmod +x dictator
+          xattr -d com.apple.quarantine dictator   # clear Gatekeeper
+          \`\`\`
+
+          **macOS (Intel):** \`dictator-macos-x86_64\` · **Windows:** \`dictator-windows-x86_64.exe\`
+
+          Each asset ships a \`.sha256\` sidecar — verify with \`shasum -a 256 -c dictator-<asset>.sha256\`.
+
+          ## Configure
+
+          \`\`\`bash
+          echo 'ELEVENLABS_API_KEY=sk_your_key_here' > ~/.dictator.env
+          \`\`\`
+
+          Run \`dictator\`, press **F9**, speak, press **F9** again. See the [README](https://github.com/${REPO}#readme) for platform notes.
+          MARKDOWN
+          echo "---- composed body ----"
+          cat release-body.md
+
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dictator-${{ matrix.target }}.tar.gz
-            dictator-${{ matrix.target }}.zip
-          fail_on_unmatched_files: false
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: dictator ${{ steps.tag.outputs.tag }}
+          body_path: release-body.md
+          files: release/*
+          token: ${{ secrets.GITHUB_TOKEN }}

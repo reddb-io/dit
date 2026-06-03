@@ -1,0 +1,49 @@
+# git-cliff configuration — drives the release-notes block in each
+# GitHub Release published by .github/workflows/release.yml.
+#
+# Conventional commits with scopes: `feat(audio):`, `fix(inject):`, …
+
+[changelog]
+header = ""
+trim = true
+footer = ""
+body = """
+{% if version -%}
+## What's in {{ version | trim_start_matches(pat="v") }}
+{% else -%}
+## Unreleased
+{% endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+
+{% for commit in commits -%}
+- {% if commit.scope %}**{{ commit.scope }}**: {% endif %}{{ commit.message | split(pat="\n") | first | trim }}
+{% endfor %}
+{% endfor -%}
+{% if previous and previous.version %}
+**Full Changelog**: https://github.com/reddb-io/dictator/compare/{{ previous.version }}...{{ version }}
+{% endif %}
+"""
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+tag_pattern = "v[0-9]*"
+topo_order = false
+sort_commits = "newest"
+
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactor" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^test", group = "Testing" },
+  { message = "^ci|^build", group = "Build & CI" },
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^chore", group = "Chores" },
+  { message = "^Merge", skip = true },
+]
