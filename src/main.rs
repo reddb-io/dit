@@ -22,6 +22,8 @@ mod notify;
 mod output;
 mod service;
 mod transcribe;
+#[cfg(target_os = "linux")]
+mod wayland;
 
 use std::sync::Arc;
 
@@ -67,7 +69,7 @@ fn main() -> Result<()> {
     }
 
     let cfg = Config::resolve(&cli)?;
-    let injector = Injector::spawn()?;
+    let injector = Injector::spawn(cfg.paste_shift)?;
 
     // Background Tokio runtime for audio + the WebSocket. Kept alive for the
     // whole program (the UI below never returns).
@@ -208,25 +210,11 @@ impl ksni::Tray for DitTray {
 
 #[cfg(target_os = "linux")]
 fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Result<()> {
-    use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
-
     let (tx, rx) = mpsc::unbounded_channel::<Control>();
     let (state_tx, mut state_rx) = mpsc::unbounded_channel::<IconState>();
     rt.spawn(manager(cfg.clone(), injector, rx, state_tx));
 
-    let hotkey_manager = GlobalHotKeyManager::new()?;
-    let hotkey = HotKey::new(None, cfg.hotkey);
-    if let Err(e) = hotkey_manager.register(hotkey) {
-        tracing::warn!("could not register the hotkey: {e}");
-        notify::notify(
-            "dit — hotkey unavailable",
-            "Another app may have grabbed the key. On Wayland use an X11 session.",
-        );
-    }
-    let hotkey_id = hotkey.id();
-
-    // Run the ksni (D-Bus) tray on the Tokio runtime and drive its icon from
-    // session state. ksni's default runtime is Tokio, so the async API fits.
+    // ksni (D-Bus) tray on the Tokio runtime, driven by session state.
     let tray_tx = tx.clone();
     rt.spawn(async move {
         use ksni::TrayMethods;
@@ -250,15 +238,34 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
 
     info!("ready — press the hotkey (or use the tray) to start/stop dictation");
 
-    // The global hotkey runs on its own thread; just poll its channel.
-    let hotkey_rx = GlobalHotKeyEvent::receiver();
-    loop {
-        while let Ok(ev) = hotkey_rx.try_recv() {
-            if ev.id == hotkey_id && ev.state == HotKeyState::Pressed {
-                let _ = tx.send(Control::Toggle);
-            }
+    if wayland::is_wayland() {
+        // Wayland: X11 global grabs don't fire, so read the hotkey from
+        // /dev/input directly (kernel-level, works under any compositor).
+        if let Err(e) = wayland::spawn_hotkey(wayland::evdev_keycode(cfg.hotkey), tx) {
+            error!("{e:#}");
+            notify::notify("dit — hotkey unavailable", &format!("{e}"));
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+    } else {
+        // X11: a real global hotkey, polled on this thread.
+        use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
+        let hotkey_manager = GlobalHotKeyManager::new()?;
+        let hotkey = HotKey::new(None, cfg.hotkey);
+        if let Err(e) = hotkey_manager.register(hotkey) {
+            tracing::warn!("could not register the hotkey: {e}");
+        }
+        let hotkey_id = hotkey.id();
+        let hotkey_rx = GlobalHotKeyEvent::receiver();
+        loop {
+            while let Ok(ev) = hotkey_rx.try_recv() {
+                if ev.id == hotkey_id && ev.state == HotKeyState::Pressed {
+                    let _ = tx.send(Control::Toggle);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 }
 

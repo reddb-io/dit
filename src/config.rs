@@ -54,6 +54,10 @@ pub struct Cli {
     #[arg(long)]
     pub no_preview: bool,
 
+    /// On Wayland, paste with Ctrl+Shift+V instead of Ctrl+V (for terminals).
+    #[arg(long)]
+    pub paste_shift: bool,
+
     /// Path to a dotenv-style file holding `ELEVENLABS_API_KEY`.
     /// Defaults to `~/.dit.env`.
     #[arg(long)]
@@ -100,6 +104,7 @@ pub struct Config {
     pub vad_silence: f64,
     pub region: String,
     pub no_preview: bool,
+    pub paste_shift: bool,
 }
 
 /// Target sample rate sent to the API (Scribe expects 16 kHz mono s16le).
@@ -143,6 +148,7 @@ impl Config {
             vad_silence: cli.vad_silence,
             region: cli.region.clone(),
             no_preview: cli.no_preview,
+            paste_shift: cli.paste_shift,
         })
     }
 

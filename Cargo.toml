@@ -38,6 +38,7 @@ strip = true
 
 # Linux: a pure-Rust D-Bus tray (no GTK/appindicator dependency).
 [target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13.2"
 ksni = "0.3.4"
 
 # macOS/Windows: the GTK-free native tray needs the platform event loop.

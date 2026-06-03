@@ -134,21 +134,51 @@ linux_deps() {
       printf '%s' "$cache" | grep -q "$so" || missing+=("$so")
     done
   fi
+  # On Wayland, typing goes through the clipboard → needs wl-copy.
+  local want_wlclip=false
+  if [[ -n "${WAYLAND_DISPLAY:-}" ]] && ! command -v wl-copy >/dev/null 2>&1; then
+    want_wlclip=true; missing+=("wl-copy")
+  fi
   [[ ${#missing[@]} -gt 0 ]] || { ok "runtime libraries present"; return 0; }
 
-  warn "missing runtime libraries: ${missing[*]}"
-  local pm="" cmd=""
-  if   command -v apt-get >/dev/null 2>&1; then pm=apt;    cmd="sudo apt-get install -y libasound2 libxdo3 libxtst6 libxi6"
-  elif command -v dnf     >/dev/null 2>&1; then pm=dnf;    cmd="sudo dnf install -y alsa-lib libxdo libXtst libXi"
-  elif command -v pacman  >/dev/null 2>&1; then pm=pacman; cmd="sudo pacman -S --needed --noconfirm alsa-lib xdotool libxtst libxi"
-  elif command -v zypper  >/dev/null 2>&1; then pm=zypper; cmd="sudo zypper install -y libasound2 libxdo3 libXtst6 libXi6"
-  else warn "unknown package manager — install the equivalents of: ${need[*]}"; return 0; fi
+  warn "missing: ${missing[*]}"
+  local pm="" cmd="" wl=""
+  $want_wlclip && wl=" wl-clipboard"
+  if   command -v apt-get >/dev/null 2>&1; then pm=apt;    cmd="sudo apt-get install -y libasound2 libxdo3 libxtst6 libxi6${wl}"
+  elif command -v dnf     >/dev/null 2>&1; then pm=dnf;    cmd="sudo dnf install -y alsa-lib libxdo libXtst libXi${wl}"
+  elif command -v pacman  >/dev/null 2>&1; then pm=pacman; cmd="sudo pacman -S --needed --noconfirm alsa-lib xdotool libxtst libxi${wl}"
+  elif command -v zypper  >/dev/null 2>&1; then pm=zypper; cmd="sudo zypper install -y libasound2 libxdo3 libXtst6 libXi6${wl}"
+  else warn "unknown package manager — install the equivalents of: ${missing[*]}"; return 0; fi
 
   if [[ "$ASSUME_YES" == true ]] || confirm "Install them now with $pm?" yes; then
     say "running: $cmd"
     eval "$cmd" || warn "dependency install failed — run it manually:\n  $cmd"
   else
     warn "skipped — install later with:\n  $cmd"
+  fi
+}
+
+# --- Wayland input permissions (evdev read + uinput write) ------------------
+wayland_setup() {
+  [[ "$OS" == "linux" && -n "${WAYLAND_DISPLAY:-}" && "$SKIP_DEPS" == false ]] || return 0
+
+  local needs_group=true needs_udev=true
+  id -nG 2>/dev/null | tr ' ' '\n' | grep -qx input && needs_group=false
+  [[ -e /etc/udev/rules.d/99-uinput.rules ]] && needs_udev=false
+  $needs_group || $needs_udev || { ok "Wayland input permissions OK"; return 0; }
+
+  warn "On Wayland, dit reads the hotkey from /dev/input and types via /dev/uinput."
+  if [[ "$ASSUME_YES" == true ]] || confirm "Set up the input-group + uinput udev rule now (sudo)?" yes; then
+    $needs_group && { say "adding you to the 'input' group"; sudo usermod -aG input "$USER" || warn "usermod failed"; }
+    if $needs_udev; then
+      say "installing the uinput udev rule"
+      echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \
+        | sudo tee /etc/udev/rules.d/99-uinput.rules >/dev/null \
+        && sudo udevadm control --reload && sudo udevadm trigger || warn "udev setup failed"
+    fi
+    warn "log out and back in for the 'input' group to take effect, then start dit"
+  else
+    warn "set it up later:\n  sudo usermod -aG input \$USER\n  echo 'KERNEL==\"uinput\", GROUP=\"input\", MODE=\"0660\"' | sudo tee /etc/udev/rules.d/99-uinput.rules\n  sudo udevadm control --reload && sudo udevadm trigger\n  (then log out and back in)"
   fi
 }
 
@@ -205,6 +235,7 @@ This platform may not have a prebuilt binary — build from source instead (see 
   esac
 
   linux_deps
+  wayland_setup
   setup_api_key
 
   # Smoke test (skip cross-OS shells where it can't run, e.g. windows under msys).
