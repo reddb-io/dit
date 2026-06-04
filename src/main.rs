@@ -53,6 +53,10 @@ pub enum IconState {
 }
 
 fn main() -> Result<()> {
+    // rustls 0.23 won't pick a crypto provider on its own; choose ring up front
+    // so the Scribe WebSocket's TLS handshake doesn't panic.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
