@@ -5,31 +5,31 @@
 //! to stop. A tray icon shows the state (idle / recording / error) and offers a
 //! menu to toggle and quit.
 //!
-//! The tray differs by platform to keep dependencies minimal:
+//! Everything is per-platform to keep dependencies minimal:
 //!
-//! - Linux uses `ksni` (a pure-Rust D-Bus StatusNotifierItem) — no GTK — and
-//!   the global hotkey runs on its own thread, so the main thread just polls.
-//! - macOS/Windows use `tray-icon` + a `tao` event loop on the main thread,
-//!   which those platforms require for tray + global hotkey.
+//! - **Linux** is fully self-contained (no external libraries/tools): hotkey via
+//!   evdev (`/dev/input`), typing via clipboard (arboard) + `/dev/uinput`, tray
+//!   via `ksni` (pure-Rust D-Bus). Works on X11 and Wayland; the main thread
+//!   idles while the hotkey reads on its own threads. See [`linux_input`].
+//! - **macOS/Windows** type with `enigo` and use `tray-icon` + `global-hotkey`
+//!   on a `tao` event loop (which those platforms require on the main thread).
 //!
-//! Audio capture and the WebSocket always run on a background Tokio runtime;
-//! session state flows back over a `std::sync::mpsc` channel to drive the icon.
+//! Audio capture and the WebSocket always run on a background Tokio runtime.
 
 mod audio;
 mod config;
 mod inject;
+#[cfg(target_os = "linux")]
+mod linux_input;
 mod notify;
 mod output;
 mod service;
 mod transcribe;
-#[cfg(target_os = "linux")]
-mod wayland;
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
-use global_hotkey::{hotkey::HotKey, GlobalHotKeyManager};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -238,34 +238,13 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
 
     info!("ready — press the hotkey (or use the tray) to start/stop dictation");
 
-    if wayland::is_wayland() {
-        // Wayland: X11 global grabs don't fire, so read the hotkey from
-        // /dev/input directly (kernel-level, works under any compositor).
-        if let Err(e) = wayland::spawn_hotkey(wayland::evdev_keycode(cfg.hotkey), tx) {
-            error!("{e:#}");
-            notify::notify("dit — hotkey unavailable", &format!("{e}"));
-        }
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(3600));
-        }
-    } else {
-        // X11: a real global hotkey, polled on this thread.
-        use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
-        let hotkey_manager = GlobalHotKeyManager::new()?;
-        let hotkey = HotKey::new(None, cfg.hotkey);
-        if let Err(e) = hotkey_manager.register(hotkey) {
-            tracing::warn!("could not register the hotkey: {e}");
-        }
-        let hotkey_id = hotkey.id();
-        let hotkey_rx = GlobalHotKeyEvent::receiver();
-        loop {
-            while let Ok(ev) = hotkey_rx.try_recv() {
-                if ev.id == hotkey_id && ev.state == HotKeyState::Pressed {
-                    let _ = tx.send(Control::Toggle);
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+    // Hotkey via evdev (/dev/input) — works on X11 and Wayland alike.
+    if let Err(e) = linux_input::spawn_hotkey(linux_input::evdev_keycode(cfg.hotkey), tx) {
+        error!("{e:#}");
+        notify::notify("dit — hotkey unavailable", &format!("{e}"));
+    }
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
     }
 }
 
@@ -279,12 +258,28 @@ enum UserEvent {
 
 #[cfg(not(target_os = "linux"))]
 fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Result<()> {
-    use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
+    use global_hotkey::hotkey::{Code, HotKey};
+    use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
     use std::time::{Duration, Instant};
     use tao::event::Event;
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, TrayIconBuilder};
+
+    let code = match cfg.hotkey {
+        config::FunctionKey::F1 => Code::F1,
+        config::FunctionKey::F2 => Code::F2,
+        config::FunctionKey::F3 => Code::F3,
+        config::FunctionKey::F4 => Code::F4,
+        config::FunctionKey::F5 => Code::F5,
+        config::FunctionKey::F6 => Code::F6,
+        config::FunctionKey::F7 => Code::F7,
+        config::FunctionKey::F8 => Code::F8,
+        config::FunctionKey::F9 => Code::F9,
+        config::FunctionKey::F10 => Code::F10,
+        config::FunctionKey::F11 => Code::F11,
+        config::FunctionKey::F12 => Code::F12,
+    };
 
     let (tx, rx) = mpsc::unbounded_channel::<Control>();
     let (state_tx, mut state_rx) = mpsc::unbounded_channel::<IconState>();
@@ -301,7 +296,7 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
     });
 
     let hotkey_manager = GlobalHotKeyManager::new()?;
-    let hotkey = HotKey::new(None, cfg.hotkey);
+    let hotkey = HotKey::new(None, code);
     if let Err(e) = hotkey_manager.register(hotkey) {
         tracing::warn!("could not register the hotkey: {e}");
     }

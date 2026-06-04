@@ -32,9 +32,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libasound2-dev libxdo-dev libxi-dev libxtst-dev \
-            libdbus-1-dev pkg-config
+          sudo apt-get install -y libasound2-dev pkg-config
 
       - uses: dtolnay/rust-toolchain@1.95.0
         with:

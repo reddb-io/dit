@@ -22,26 +22,30 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 cpal = "0.15"
-enigo = "0.2"
 notify-rust = "4"
 anyhow = "1"
 dirs = "5"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-global-hotkey = "0.8.0"
 
 [profile.release]
 opt-level = 3
 lto = true
 strip = true
 
-# Linux: a pure-Rust D-Bus tray (no GTK/appindicator dependency).
+# Linux: fully self-contained — pure-Rust input (evdev hotkey + /dev/uinput
+# paste), clipboard (arboard: x11rb + wl-clipboard-rs, no C libs) and a D-Bus
+# tray (ksni, no GTK). No external apt packages beyond the universal libasound.
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13.2"
+arboard = "3.6.1"
 ksni = "0.3.4"
 
-# macOS/Windows: the GTK-free native tray needs the platform event loop.
+# macOS/Windows: native typing (enigo) + tray-icon on a tao event loop, with the
+# global hotkey via global-hotkey.
 [target.'cfg(not(target_os = "linux"))'.dependencies]
+enigo = "0.2"
+global-hotkey = "0.8.0"
 tao = "0.35.3"
 tray-icon = "0.24.0"

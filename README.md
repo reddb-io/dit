@@ -82,9 +82,9 @@ chmod +x dit && sudo mv dit /usr/local/bin/
 Every asset ships a `.sha256` sidecar — verify with `shasum -a 256 -c dit-<asset>.sha256`.
 
 > [!NOTE]
-> The prebuilt Linux binary is dynamically linked. Install its runtime libs once:
-> `sudo apt-get install -y libasound2 libxdo3 libxtst6 libxi6` (the one-liner installer does this for
-> you). macOS and Windows need nothing extra.
+> The prebuilt Linux binary is **self-contained** — the only shared library it needs is
+> `libasound2` (audio), which every desktop already has. No `libxdo`, `wl-clipboard`, GTK or
+> appindicator. macOS and Windows need nothing extra.
 
 ### Build from source
 
@@ -96,11 +96,11 @@ cargo install --path .          # or: cargo build --release
 <summary><strong>Linux build dependencies</strong></summary>
 
 ```bash
-sudo apt-get install -y \
-  libasound2-dev libxdo-dev libxi-dev libxtst-dev libdbus-1-dev pkg-config
+sudo apt-get install -y libasound2-dev pkg-config
 ```
 
-(The Linux tray uses a pure-Rust D-Bus client — no GTK or appindicator needed.)
+(That's the only build dependency — the Linux input, clipboard and tray are all
+pure-Rust, so no X11/GTK/xdo/appindicator dev packages are needed.)
 
 macOS and Windows need no extra system packages.
 </details>
@@ -228,17 +228,16 @@ Typing lands in anything that accepts keyboard input and never touches your clip
 ## Platform notes
 
 > [!IMPORTANT]
-> **Linux** — on **X11** everything works out of the box (X11 global hotkey + direct typing).
-> On **Wayland** (where X11 global grabs and X11 input don't reach native apps), dit switches to a
-> kernel-level backend: it reads the hotkey from `/dev/input` (evdev) and types by setting the
-> clipboard and emitting the paste chord through `/dev/uinput`. That needs a one-time setup
-> (the installer offers to do it):
+> **Linux** — dit uses a kernel-level input backend (works the same on **X11 and Wayland**, since
+> X11 global grabs and X11 input don't reach native Wayland apps): it reads the hotkey from
+> `/dev/input` (evdev) and types by setting the clipboard and emitting the paste chord through
+> `/dev/uinput`. No external libraries or tools — but it needs a one-time permission setup, which the
+> installer offers to do:
 >
 > ```bash
 > sudo usermod -aG input $USER          # read the keyboard
 > echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' | sudo tee /etc/udev/rules.d/99-uinput.rules
 > sudo udevadm control --reload && sudo udevadm trigger   # write to uinput
-> sudo apt-get install -y wl-clipboard  # clipboard
 > # then log out and back in
 > ```
 >

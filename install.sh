@@ -122,52 +122,41 @@ verify_checksum() {
 }
 
 # --- Linux runtime dependencies --------------------------------------------
+# The Linux binary is self-contained (pure-Rust input/clipboard/tray); the only
+# external library it needs is libasound, which every desktop already ships.
 linux_deps() {
   [[ "$OS" == "linux" && "$SKIP_DEPS" == false ]] || return 0
 
-  # sonames the dynamically-linked binary needs (audio + X11 input).
-  local need=(libasound.so.2 libxdo.so.3 libXtst.so.6 libXi.so.6)
-  local missing=()
-  if command -v ldconfig >/dev/null 2>&1; then
-    local cache; cache="$(ldconfig -p 2>/dev/null || true)"
-    for so in "${need[@]}"; do
-      printf '%s' "$cache" | grep -q "$so" || missing+=("$so")
-    done
+  if command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q libasound.so.2; then
+    ok "runtime libraries present"; return 0
   fi
-  # On Wayland, typing goes through the clipboard → needs wl-copy.
-  local want_wlclip=false
-  if [[ -n "${WAYLAND_DISPLAY:-}" ]] && ! command -v wl-copy >/dev/null 2>&1; then
-    want_wlclip=true; missing+=("wl-copy")
-  fi
-  [[ ${#missing[@]} -gt 0 ]] || { ok "runtime libraries present"; return 0; }
+  local pm="" cmd=""
+  if   command -v apt-get >/dev/null 2>&1; then pm=apt;    cmd="sudo apt-get install -y libasound2"
+  elif command -v dnf     >/dev/null 2>&1; then pm=dnf;    cmd="sudo dnf install -y alsa-lib"
+  elif command -v pacman  >/dev/null 2>&1; then pm=pacman; cmd="sudo pacman -S --needed --noconfirm alsa-lib"
+  elif command -v zypper  >/dev/null 2>&1; then pm=zypper; cmd="sudo zypper install -y libasound2"
+  else warn "install your distro's ALSA runtime (libasound)"; return 0; fi
 
-  warn "missing: ${missing[*]}"
-  local pm="" cmd="" wl=""
-  $want_wlclip && wl=" wl-clipboard"
-  if   command -v apt-get >/dev/null 2>&1; then pm=apt;    cmd="sudo apt-get install -y libasound2 libxdo3 libxtst6 libxi6${wl}"
-  elif command -v dnf     >/dev/null 2>&1; then pm=dnf;    cmd="sudo dnf install -y alsa-lib libxdo libXtst libXi${wl}"
-  elif command -v pacman  >/dev/null 2>&1; then pm=pacman; cmd="sudo pacman -S --needed --noconfirm alsa-lib xdotool libxtst libxi${wl}"
-  elif command -v zypper  >/dev/null 2>&1; then pm=zypper; cmd="sudo zypper install -y libasound2 libxdo3 libXtst6 libXi6${wl}"
-  else warn "unknown package manager — install the equivalents of: ${missing[*]}"; return 0; fi
-
-  if [[ "$ASSUME_YES" == true ]] || confirm "Install them now with $pm?" yes; then
-    say "running: $cmd"
-    eval "$cmd" || warn "dependency install failed — run it manually:\n  $cmd"
+  warn "missing libasound"
+  if [[ "$ASSUME_YES" == true ]] || confirm "Install it now with $pm?" yes; then
+    say "running: $cmd"; eval "$cmd" || warn "install failed — run manually:\n  $cmd"
   else
     warn "skipped — install later with:\n  $cmd"
   fi
 }
 
-# --- Wayland input permissions (evdev read + uinput write) ------------------
-wayland_setup() {
-  [[ "$OS" == "linux" && -n "${WAYLAND_DISPLAY:-}" && "$SKIP_DEPS" == false ]] || return 0
+# --- Linux input permissions (evdev read + uinput write) --------------------
+# dit reads the hotkey from /dev/input and types via /dev/uinput on both X11 and
+# Wayland, so this is needed on all Linux sessions.
+linux_input_setup() {
+  [[ "$OS" == "linux" && "$SKIP_DEPS" == false ]] || return 0
 
   local needs_group=true needs_udev=true
   id -nG 2>/dev/null | tr ' ' '\n' | grep -qx input && needs_group=false
   [[ -e /etc/udev/rules.d/99-uinput.rules ]] && needs_udev=false
-  $needs_group || $needs_udev || { ok "Wayland input permissions OK"; return 0; }
+  $needs_group || $needs_udev || { ok "input permissions OK"; return 0; }
 
-  warn "On Wayland, dit reads the hotkey from /dev/input and types via /dev/uinput."
+  warn "dit reads the hotkey from /dev/input and types via /dev/uinput."
   if [[ "$ASSUME_YES" == true ]] || confirm "Set up the input-group + uinput udev rule now (sudo)?" yes; then
     $needs_group && { say "adding you to the 'input' group"; sudo usermod -aG input "$USER" || warn "usermod failed"; }
     if $needs_udev; then
@@ -235,7 +224,7 @@ This platform may not have a prebuilt binary — build from source instead (see 
   esac
 
   linux_deps
-  wayland_setup
+  linux_input_setup
   setup_api_key
 
   # Smoke test (skip cross-OS shells where it can't run, e.g. windows under msys).

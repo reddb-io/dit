@@ -8,7 +8,24 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use global_hotkey::hotkey::Code;
+
+/// A platform-neutral toggle key (F1..F12). Converted to the right per-OS
+/// representation where it's used (global-hotkey on macOS/Windows, evdev on Linux).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FunctionKey {
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+}
 
 /// Cross-platform voice dictation via ElevenLabs Scribe v2 Realtime.
 #[derive(Parser, Debug)]
@@ -97,7 +114,7 @@ pub struct Config {
     pub api_key: String,
     pub language: String,
     pub model: String,
-    pub hotkey: Code,
+    pub hotkey: FunctionKey,
     pub device: Option<String>,
     pub no_filler: bool,
     pub keyterms: Vec<String>,
@@ -224,21 +241,22 @@ fn load_env_file(path: &PathBuf) {
     }
 }
 
-/// Parse function-key names into a `global_hotkey` key code.
-fn parse_hotkey(name: &str) -> Result<Code> {
+/// Parse a function-key name into a [`FunctionKey`].
+fn parse_hotkey(name: &str) -> Result<FunctionKey> {
+    use FunctionKey::*;
     let key = match name.to_ascii_uppercase().as_str() {
-        "F1" => Code::F1,
-        "F2" => Code::F2,
-        "F3" => Code::F3,
-        "F4" => Code::F4,
-        "F5" => Code::F5,
-        "F6" => Code::F6,
-        "F7" => Code::F7,
-        "F8" => Code::F8,
-        "F9" => Code::F9,
-        "F10" => Code::F10,
-        "F11" => Code::F11,
-        "F12" => Code::F12,
+        "F1" => F1,
+        "F2" => F2,
+        "F3" => F3,
+        "F4" => F4,
+        "F5" => F5,
+        "F6" => F6,
+        "F7" => F7,
+        "F8" => F8,
+        "F9" => F9,
+        "F10" => F10,
+        "F11" => F11,
+        "F12" => F12,
         other => bail!("only F1..F12 are supported, got {other}"),
     };
     Ok(key)
