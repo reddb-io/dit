@@ -1,19 +1,76 @@
 //! Cross-platform microphone capture (replaces `parec` from the original script).
 //!
-//! `cpal` opens the default (or named) input device at whatever native rate it
-//! prefers. The capture runs on its own thread because a `cpal::Stream` is not
-//! `Send`; it pushes mono `f32` frames into a Tokio channel, and reports the
-//! device's sample rate back so the sender side can resample to 16 kHz.
+//! `cpal` opens the best available input device: an explicit `--device` match,
+//! then PipeWire/default aliases, then hardware devices. The capture runs on its
+//! own thread because a `cpal::Stream` is not `Send`; it pushes bounded mono
+//! `f32` frames into a Tokio channel, and reports sample-rate changes so the
+//! sender side can resample to 16 kHz.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
+
+/// Bounded realtime audio queue. If the WebSocket/network is behind, callbacks
+/// drop stale frames instead of letting memory grow or sending old speech late.
+const STALE_AUDIO_CAPACITY: usize = 64;
+
+/// Messages produced by the capture thread.
+pub enum CaptureEvent {
+    /// The active microphone changed format. Consumers must rebuild resamplers.
+    Format { sample_rate: u32 },
+    /// Mono `f32` frames at the most recently announced native sample rate.
+    Samples(Vec<f32>),
+}
+
+pub fn recommended_audio_channel_capacity() -> usize {
+    STALE_AUDIO_CAPACITY
+}
+
+/// Rank capture devices. Lower is better. This avoids getting stuck on ALSA
+/// pseudo-devices that CPAL may enumerate as inputs but that commonly fail or
+/// are playback-oriented aliases (`front`, `surround*`, `dmix`, HDMI, etc.).
+fn device_rank(
+    name: &str,
+    prefer: Option<&str>,
+    default_name: Option<&str>,
+    index: usize,
+) -> (u8, usize) {
+    let lower = name.to_lowercase();
+    let preferred = prefer.is_some_and(|needle| lower.contains(needle));
+    let default = default_name.is_some_and(|default| name == default);
+    let bad_alsa_pseudo = lower.starts_with("surround")
+        || lower.starts_with("front:")
+        || lower.starts_with("dmix")
+        || lower.starts_with("iec958")
+        || lower.starts_with("hdmi");
+    let pipewire = lower == "pipewire";
+    let default_alias = lower == "default";
+    let plughw = lower.starts_with("plughw:");
+    let hw = lower.starts_with("hw:");
+
+    let rank = if preferred {
+        0
+    } else if pipewire {
+        1
+    } else if default || default_alias {
+        2
+    } else if plughw {
+        3
+    } else if hw {
+        4
+    } else if bad_alsa_pseudo {
+        9
+    } else {
+        5
+    };
+    (rank, index)
+}
 
 /// List input devices to stdout (for `--list-devices`).
 pub fn list_devices() -> Result<()> {
@@ -31,66 +88,128 @@ pub fn list_devices() -> Result<()> {
     Ok(())
 }
 
-fn pick_device(prefer: &Option<String>) -> Result<cpal::Device> {
+fn candidate_devices(prefer: &Option<String>) -> Result<Vec<(String, cpal::Device)>> {
     let host = cpal::default_host();
-    if let Some(needle) = prefer {
-        let needle = needle.to_lowercase();
-        if let Ok(devices) = host.input_devices() {
-            for device in devices {
-                if let Ok(name) = device.name() {
-                    if name.to_lowercase().contains(&needle) {
-                        return Ok(device);
-                    }
-                }
-            }
-        }
-        warn!("device matching '{needle}' not found, falling back to default");
+    let default_name = host.default_input_device().and_then(|d| d.name().ok());
+    let prefer = prefer.as_ref().map(|s| s.to_lowercase());
+    let mut ranked = Vec::new();
+
+    for (idx, device) in host.input_devices()?.enumerate() {
+        let name = device.name().unwrap_or_else(|_| "<unknown>".into());
+        let rank = device_rank(&name, prefer.as_deref(), default_name.as_deref(), idx);
+        ranked.push((rank, name, device));
     }
-    host.default_input_device()
-        .ok_or_else(|| anyhow!("no input device available"))
+
+    if ranked.is_empty() {
+        return Err(anyhow!("no input devices available"));
+    }
+    if let Some(needle) = prefer {
+        if !ranked
+            .iter()
+            .any(|(_, name, _)| name.to_lowercase().contains(&needle))
+        {
+            warn!("device matching '{needle}' not found, trying all input devices");
+        }
+    }
+
+    ranked.sort_by_key(|(rank, _, _)| *rank);
+    Ok(ranked
+        .into_iter()
+        .map(|(_, name, device)| (name, device))
+        .collect())
 }
 
 /// Spawn the capture thread. Returns once the stream is live (or errors).
 ///
-/// * `samples_tx` receives mono `f32` chunks at the device's native rate.
-/// * `rate_tx` is fired once with that native sample rate.
+/// * `events_tx` receives format-change notices and mono `f32` chunks.
+/// * `rate_tx` is fired once with the first live native sample rate.
 /// * Setting `stop` tears the stream down.
 pub fn spawn_capture(
     prefer: Option<String>,
     stop: Arc<AtomicBool>,
-    samples_tx: UnboundedSender<Vec<f32>>,
+    events_tx: Sender<CaptureEvent>,
     rate_tx: oneshot::Sender<u32>,
 ) {
     std::thread::spawn(move || {
-        if let Err(e) = run_capture(prefer, stop, samples_tx, rate_tx) {
-            error!("audio capture failed: {e:#}");
-        }
+        run_capture(prefer, stop, events_tx, rate_tx);
     });
 }
 
 fn run_capture(
     prefer: Option<String>,
     stop: Arc<AtomicBool>,
-    samples_tx: UnboundedSender<Vec<f32>>,
+    events_tx: Sender<CaptureEvent>,
     rate_tx: oneshot::Sender<u32>,
+) {
+    let mut first_rate = Some(rate_tx);
+    while !stop.load(Ordering::Relaxed) {
+        match run_capture_once(&prefer, stop.clone(), events_tx.clone(), &mut first_rate) {
+            Ok(()) => break,
+            Err(e) if stop.load(Ordering::Relaxed) => {
+                debug!("audio capture stopped: {e:#}");
+                break;
+            }
+            Err(e) => {
+                warn!("audio capture unavailable, retrying: {e:#}");
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+    }
+}
+
+fn run_capture_once(
+    prefer: &Option<String>,
+    stop: Arc<AtomicBool>,
+    events_tx: Sender<CaptureEvent>,
+    first_rate: &mut Option<oneshot::Sender<u32>>,
 ) -> Result<()> {
-    let device = pick_device(&prefer)?;
-    let name = device.name().unwrap_or_else(|_| "<unknown>".into());
+    let candidates = candidate_devices(prefer)?;
+    let mut errors = Vec::new();
+    for (name, device) in candidates {
+        match open_stream(&name, &device, stop.clone(), events_tx.clone(), first_rate) {
+            Ok(()) => return Ok(()),
+            Err(e) => errors.push(format!("{name}: {e:#}")),
+        }
+    }
+    Err(anyhow!(
+        "no usable input device found ({})",
+        errors.join("; ")
+    ))
+}
+
+fn open_stream(
+    name: &str,
+    device: &cpal::Device,
+    stop: Arc<AtomicBool>,
+    events_tx: Sender<CaptureEvent>,
+    first_rate: &mut Option<oneshot::Sender<u32>>,
+) -> Result<()> {
     let config = device.default_input_config()?;
     let sample_rate = config.sample_rate().0;
     let channels = config.channels() as usize;
     info!("capturing from '{name}' @ {sample_rate} Hz, {channels} ch");
-    let _ = rate_tx.send(sample_rate);
+    if let Some(tx) = first_rate.take() {
+        let _ = tx.send(sample_rate);
+    }
+    let _ = events_tx.try_send(CaptureEvent::Format { sample_rate });
 
-    let err_fn = |e| error!("audio stream error: {e}");
-    let tx = samples_tx.clone();
+    let stream_failed = Arc::new(AtomicBool::new(false));
+    let failed = stream_failed.clone();
+    let device_name = name.to_string();
+    let err_fn = move |e| {
+        error!("audio stream error on '{device_name}': {e}");
+        failed.store(true, Ordering::Relaxed);
+    };
+    let tx = events_tx.clone();
 
-    // Downmix interleaved frames to mono and forward.
+    // Downmix interleaved frames to mono and forward. try_send intentionally
+    // drops frames when the bounded realtime queue is full.
     let stream = match config.sample_format() {
         SampleFormat::F32 => device.build_input_stream(
             &config.into(),
             move |data: &[f32], _| {
-                tx.send(downmix(data, channels, |s| s)).ok();
+                tx.try_send(CaptureEvent::Samples(downmix(data, channels, |s| s)))
+                    .ok();
             },
             err_fn,
             None,
@@ -98,8 +217,10 @@ fn run_capture(
         SampleFormat::I16 => device.build_input_stream(
             &config.into(),
             move |data: &[i16], _| {
-                tx.send(downmix(data, channels, |s| s as f32 / i16::MAX as f32))
-                    .ok();
+                tx.try_send(CaptureEvent::Samples(downmix(data, channels, |s| {
+                    s as f32 / i16::MAX as f32
+                })))
+                .ok();
             },
             err_fn,
             None,
@@ -107,9 +228,9 @@ fn run_capture(
         SampleFormat::U16 => device.build_input_stream(
             &config.into(),
             move |data: &[u16], _| {
-                tx.send(downmix(data, channels, |s| {
+                tx.try_send(CaptureEvent::Samples(downmix(data, channels, |s| {
                     (s as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0)
-                }))
+                })))
                 .ok();
             },
             err_fn,
@@ -118,12 +239,18 @@ fn run_capture(
         other => return Err(anyhow!("unsupported sample format: {other:?}")),
     };
 
-    stream.play()?;
-    while !stop.load(Ordering::Relaxed) {
-        std::thread::sleep(std::time::Duration::from_millis(20));
+    stream
+        .play()
+        .with_context(|| format!("could not start input stream for '{name}'"))?;
+    while !stop.load(Ordering::Relaxed) && !stream_failed.load(Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
     drop(stream);
-    Ok(())
+    if stream_failed.load(Ordering::Relaxed) {
+        Err(anyhow!("input stream for '{name}' stopped"))
+    } else {
+        Ok(())
+    }
 }
 
 /// Average interleaved channels down to a single mono track.
@@ -173,4 +300,40 @@ impl Resampler {
 
 fn to_i16(s: f32) -> i16 {
     (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ranks_pipewire_and_default_before_noisy_alsa_pseudo_devices() {
+        let mut names = [
+            "surround51:CARD=PCH,DEV=0",
+            "hw:CARD=USB,DEV=0",
+            "default",
+            "pipewire",
+            "front:CARD=PCH,DEV=0",
+            "plughw:CARD=USB,DEV=0",
+        ];
+        names.sort_by_key(|name| device_rank(name, None, Some("default"), 0));
+        assert_eq!(names[0], "pipewire");
+        assert_eq!(names[1], "default");
+        assert_eq!(names[2], "plughw:CARD=USB,DEV=0");
+        assert_eq!(names[3], "hw:CARD=USB,DEV=0");
+        assert!(names[4].starts_with("surround") || names[4].starts_with("front"));
+    }
+
+    #[test]
+    fn explicit_device_preference_wins_over_pipewire_and_default() {
+        let preferred = device_rank("USB Audio Device", Some("usb audio"), Some("default"), 5);
+        let pipewire = device_rank("pipewire", Some("usb audio"), Some("default"), 0);
+        assert!(preferred < pipewire);
+    }
+
+    #[test]
+    fn audio_channel_is_bounded_to_drop_stale_realtime_audio() {
+        assert!(recommended_audio_channel_capacity() > 0);
+        assert!(recommended_audio_channel_capacity() <= 128);
+    }
 }

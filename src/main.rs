@@ -18,6 +18,7 @@
 
 mod audio;
 mod config;
+mod doctor;
 mod inject;
 #[cfg(target_os = "linux")]
 mod linux_input;
@@ -67,6 +68,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Some(Command::Service { action }) = &cli.command {
         return service::run(action);
+    }
+    if let Some(Command::Doctor) = &cli.command {
+        return doctor::run(cli.device.clone());
     }
     if cli.list_devices {
         return audio::list_devices();

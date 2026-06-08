@@ -14,6 +14,7 @@
 #   --with-service         install the autostart user service
 #   --no-service           never install the service
 #   --skip-deps            don't touch system runtime libraries
+#   --force                reinstall even if the requested version is already present
 #   --yes, -y              non-interactive: accept defaults, no prompts
 #   -h, --help             show this help
 #
@@ -27,6 +28,7 @@ API_KEY=""
 ASSUME_YES=false
 WANT_SERVICE="ask"   # ask | yes | no
 SKIP_DEPS=false
+FORCE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -36,6 +38,7 @@ while [[ $# -gt 0 ]]; do
     --with-service) WANT_SERVICE="yes"; shift ;;
     --no-service)   WANT_SERVICE="no"; shift ;;
     --skip-deps)    SKIP_DEPS=true; shift ;;
+    --force)        FORCE=true; shift ;;
     -y|--yes)       ASSUME_YES=true; shift ;;
     -h|--help)      sed -n '2,20p' "$0" 2>/dev/null || true; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -121,6 +124,91 @@ verify_checksum() {
   ok "checksum verified"
 }
 
+normalize_version() {
+  local v="${1:-}"
+  v="${v#dit }"
+  v="${v#v}"
+  printf '%s' "$v"
+}
+
+version_of() {
+  local bin="$1" out=""
+  [[ -x "$bin" || "$OS" == "windows" ]] || return 1
+  out="$($bin --version 2>/dev/null || true)"
+  [[ -n "$out" ]] || return 1
+  printf '%s' "$(normalize_version "$out")"
+}
+
+find_existing_binary() {
+  local dest="$1" found=""
+  if [[ -f "$dest" ]]; then
+    printf '%s' "$dest"
+    return 0
+  fi
+  found="$(command -v "${BINARY_NAME}${EXT}" 2>/dev/null || command -v "$BINARY_NAME" 2>/dev/null || true)"
+  [[ -n "$found" ]] || return 1
+  printf '%s' "$found"
+}
+
+compare_versions() {
+  # Prints -1, 0, or 1 for a < b, a == b, or a > b. Uses sort -V where
+  # available and falls back to equality-only comparison on minimal systems.
+  local a b first
+  a="$(normalize_version "$1")"
+  b="$(normalize_version "$2")"
+  [[ "$a" == "$b" ]] && { echo 0; return; }
+  if first="$(printf '%s\n%s\n' "$a" "$b" | sort -V 2>/dev/null | head -n1)"; then
+    [[ "$first" == "$a" ]] && echo -1 || echo 1
+  else
+    echo 1
+  fi
+}
+
+maybe_report_existing() {
+  local dest="$1" target_version existing existing_ver cmp
+  target_version="$(normalize_version "$RELEASE_TAG")"
+  existing="$(find_existing_binary "$dest" || true)"
+  [[ -n "$existing" ]] || return 0
+
+  if existing_ver="$(version_of "$existing" || true)" && [[ -n "$existing_ver" ]]; then
+    cmp="$(compare_versions "$existing_ver" "$target_version")"
+    if [[ "$cmp" == "0" ]]; then
+      ok "found existing ${BINARY_NAME} ${existing_ver} at ${existing}"
+      if [[ "$FORCE" == false ]]; then
+        say "already on ${RELEASE_TAG}; use --force to reinstall the binary"
+        ALREADY_CURRENT=true
+      fi
+    elif [[ "$cmp" == "-1" ]]; then
+      say "updating existing ${BINARY_NAME} ${existing_ver} → ${target_version} (${existing})"
+    else
+      warn "installed ${BINARY_NAME} ${existing_ver} is newer than requested ${target_version}; continuing because ${RELEASE_TAG} was requested"
+    fi
+  else
+    say "found existing ${BINARY_NAME} at ${existing}; version unknown, reinstalling"
+  fi
+}
+
+restart_existing_service() {
+  local dest="$1"
+  [[ "$OS" == "linux" ]] || return 0
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl --user list-unit-files dit.service >/dev/null 2>&1 || return 0
+
+  local exec_start="" active=""
+  exec_start="$(systemctl --user show dit.service -p ExecStart --value 2>/dev/null || true)"
+  if [[ "$exec_start" != *"$dest"* ]]; then
+    return 0
+  fi
+
+  active="$(systemctl --user is-active dit.service 2>/dev/null || true)"
+  if [[ "$active" == "active" ]]; then
+    say "restarting dit.service so it picks up the updated binary"
+    systemctl --user restart dit.service && ok "dit.service restarted" || warn "could not restart dit.service; restart dit manually"
+  elif pgrep -u "$(id -u)" -f "(^|/)${BINARY_NAME}([[:space:]]|$)" >/dev/null 2>&1; then
+    warn "dit appears to be running outside the managed service; quit/restart it to use ${dest}"
+  fi
+}
+
 # --- Linux runtime dependencies --------------------------------------------
 # The Linux binary is self-contained (pure-Rust input/clipboard/tray); the only
 # external library it needs is libasound, which every desktop already ships.
@@ -201,21 +289,30 @@ main() {
 
   local asset="${BINARY_NAME}-${PLATFORM}${EXT}"
   local url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${asset}"
-  local tmp; tmp="$(mktemp)"
-  trap 'rm -f "$tmp"' EXIT
-
-  say "installing ${BINARY_NAME} ${RELEASE_TAG} (${PLATFORM})"
-  dl_to "$url" "$tmp" || die "Download failed: $url
-This platform may not have a prebuilt binary — build from source instead (see the README)."
-  verify_checksum "$tmp" "$asset"
-
-  mkdir -p "$INSTALL_DIR"
   local dest="${INSTALL_DIR}/${BINARY_NAME}${EXT}"
-  mv "$tmp" "$dest"; trap - EXIT
-  if [[ "$OS" != "windows" ]]; then chmod +x "$dest"; fi
-  # macOS: clear the Gatekeeper quarantine flag so it runs without a prompt.
-  if [[ "$OS" == "macos" ]]; then xattr -d com.apple.quarantine "$dest" 2>/dev/null || true; fi
-  ok "installed → ${dest}"
+  ALREADY_CURRENT=false
+
+  maybe_report_existing "$dest"
+
+  if [[ "$ALREADY_CURRENT" == false ]]; then
+    local tmp; tmp="$(mktemp)"
+    trap 'rm -f "$tmp"' EXIT
+
+    say "installing ${BINARY_NAME} ${RELEASE_TAG} (${PLATFORM})"
+    dl_to "$url" "$tmp" || die "Download failed: $url
+This platform may not have a prebuilt binary — build from source instead (see the README)."
+    verify_checksum "$tmp" "$asset"
+
+    mkdir -p "$INSTALL_DIR"
+    mv "$tmp" "$dest"; trap - EXIT
+    if [[ "$OS" != "windows" ]]; then chmod +x "$dest"; fi
+    # macOS: clear the Gatekeeper quarantine flag so it runs without a prompt.
+    if [[ "$OS" == "macos" ]]; then xattr -d com.apple.quarantine "$dest" 2>/dev/null || true; fi
+    ok "installed → ${dest}"
+    restart_existing_service "$dest"
+  else
+    mkdir -p "$INSTALL_DIR"
+  fi
 
   # PATH hint
   case ":${PATH}:" in

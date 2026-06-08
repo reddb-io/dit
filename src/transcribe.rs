@@ -23,7 +23,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::{ClientRequestBuilder, Message};
 use tracing::{debug, info, warn};
 
-use crate::audio::{self, Resampler};
+use crate::audio::{self, CaptureEvent, Resampler};
 use crate::config::{Config, CHUNK_MS, FINAL_WAIT_SECS, SAMPLE_RATE};
 use crate::inject::Injector;
 use crate::notify::notify;
@@ -52,11 +52,23 @@ pub async fn run_session(
 async fn session_inner(cfg: Config, injector: Injector, stop: Arc<Notify>) -> Result<()> {
     // --- microphone capture on its own thread ---
     let audio_stop = Arc::new(AtomicBool::new(false));
-    let (samples_tx, mut samples_rx) = mpsc::unbounded_channel::<Vec<f32>>();
+    let (samples_tx, mut samples_rx) =
+        mpsc::channel::<CaptureEvent>(audio::recommended_audio_channel_capacity());
     let (rate_tx, rate_rx) = oneshot::channel::<u32>();
     audio::spawn_capture(cfg.device.clone(), audio_stop.clone(), samples_tx, rate_tx);
-    let native_rate = rate_rx.await.unwrap_or(SAMPLE_RATE);
-    let resampler = Resampler::new(native_rate, SAMPLE_RATE);
+    let native_rate = match timeout(Duration::from_secs(5), rate_rx).await {
+        Ok(Ok(rate)) => rate,
+        Ok(Err(_)) => SAMPLE_RATE,
+        Err(_) => {
+            warn!("still waiting for a usable microphone");
+            notify(
+                "dit — waiting for microphone",
+                "No usable input stream yet; plug/select a mic and dit will keep trying",
+            );
+            SAMPLE_RATE
+        }
+    };
+    let mut resampler = Resampler::new(native_rate, SAMPLE_RATE);
     let chunk_bytes = (SAMPLE_RATE * 2 * CHUNK_MS / 1000) as usize;
 
     // --- connect to Scribe ---
@@ -176,7 +188,13 @@ async fn session_inner(cfg: Config, injector: Injector, stop: Arc<Notify>) -> Re
         tokio::select! {
             _ = stop.notified() => break,
             maybe = samples_rx.recv() => match maybe {
-                Some(frame) => {
+                Some(CaptureEvent::Format { sample_rate }) => {
+                    if sample_rate != native_rate {
+                        info!("audio input switched to {sample_rate} Hz");
+                    }
+                    resampler = Resampler::new(sample_rate, SAMPLE_RATE);
+                }
+                Some(CaptureEvent::Samples(frame)) => {
                     resampler.push(&frame, &mut buf);
                     flush_chunks(&mut write, &mut buf, chunk_bytes).await?;
                 }
@@ -187,8 +205,13 @@ async fn session_inner(cfg: Config, injector: Injector, stop: Arc<Notify>) -> Re
     audio_stop.store(true, std::sync::atomic::Ordering::Relaxed);
 
     // Drain whatever audio is still buffered in the channel.
-    while let Ok(Some(frame)) = timeout(Duration::from_millis(50), samples_rx.recv()).await {
-        resampler.push(&frame, &mut buf);
+    while let Ok(Some(event)) = timeout(Duration::from_millis(50), samples_rx.recv()).await {
+        match event {
+            CaptureEvent::Format { sample_rate } => {
+                resampler = Resampler::new(sample_rate, SAMPLE_RATE);
+            }
+            CaptureEvent::Samples(frame) => resampler.push(&frame, &mut buf),
+        }
     }
     flush_chunks(&mut write, &mut buf, 1).await?; // flush remainder
 

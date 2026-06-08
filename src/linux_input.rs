@@ -11,8 +11,11 @@
 //! `/dev/uinput` (a udev rule). Unicode rides the clipboard; uinput only sends
 //! the Ctrl+V (or Ctrl+Shift+V) chord.
 
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use evdev::{uinput::VirtualDevice, AttributeSet, EventType, KeyCode, KeyEvent};
@@ -22,6 +25,24 @@ use tracing::{debug, error, info, warn};
 use crate::config::FunctionKey;
 use crate::inject::InjectMsg;
 use crate::Control;
+
+const HOTKEY_DEBOUNCE: Duration = Duration::from_millis(350);
+
+#[derive(Default)]
+struct HotkeyDebouncer {
+    last: Mutex<Option<Instant>>,
+}
+
+impl HotkeyDebouncer {
+    fn should_fire(&self, now: Instant) -> bool {
+        let mut last = self.last.lock().expect("hotkey debounce lock poisoned");
+        if last.is_some_and(|last| now.duration_since(last) < HOTKEY_DEBOUNCE) {
+            return false;
+        }
+        *last = Some(now);
+        true
+    }
+}
 
 /// Map our neutral hotkey to an evdev key code.
 pub fn evdev_keycode(key: FunctionKey) -> KeyCode {
@@ -44,48 +65,114 @@ pub fn evdev_keycode(key: FunctionKey) -> KeyCode {
 
 /// Spawn one reader thread per keyboard; each forwards a press of `target` as a
 /// toggle. Autorepeat (value 2) and release (value 0) are ignored.
+///
+/// The device set is re-scanned forever so USB/Bluetooth keyboards that appear
+/// after `dit` starts are picked up automatically. Dead readers unregister their
+/// path so the monitor can attach again if the kernel reuses the event node.
 pub fn spawn_hotkey(target: KeyCode, tx: UnboundedSender<Control>) -> Result<()> {
     let target_code = target.code();
-    let mut found = 0;
+    let active = Arc::new(Mutex::new(HashSet::<PathBuf>::new()));
+    let debouncer = Arc::new(HotkeyDebouncer::default());
+    let found = scan_keyboards(target_code, &tx, &active, &debouncer);
 
-    for (_path, dev) in evdev::enumerate() {
-        let is_keyboard = dev
-            .supported_keys()
-            .is_some_and(|k| k.contains(KeyCode::KEY_SPACE) && k.contains(KeyCode::KEY_A));
-        if !is_keyboard {
-            continue;
-        }
-        found += 1;
-        let tx = tx.clone();
-        let mut dev = dev;
-        std::thread::spawn(move || loop {
-            match dev.fetch_events() {
-                Ok(events) => {
-                    for ev in events {
-                        if ev.event_type() == EventType::KEY
-                            && ev.code() == target_code
-                            && ev.value() == 1
-                        {
-                            let _ = tx.send(Control::Toggle);
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("keyboard reader stopped: {e}");
-                    break;
-                }
-            }
-        });
-    }
-
-    if found == 0 {
+    if found == 0 && !Path::new("/dev/input").exists() {
         bail!(
             "no readable keyboards under /dev/input — add yourself to the 'input' group:\n  \
              sudo usermod -aG input $USER   (then log out and back in)"
         );
     }
-    info!("listening for the hotkey on {found} keyboard(s) via evdev");
+    if found == 0 {
+        warn!("no readable hotkey-capable keyboard found yet; monitoring /dev/input");
+    } else {
+        info!("listening for the hotkey on {found} keyboard(s) via evdev");
+    }
+
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(2));
+        let newly_found = scan_keyboards(target_code, &tx, &active, &debouncer);
+        if newly_found > 0 {
+            info!("attached hotkey listener to {newly_found} new keyboard(s)");
+        }
+    });
     Ok(())
+}
+
+fn scan_keyboards(
+    target_code: u16,
+    tx: &UnboundedSender<Control>,
+    active: &Arc<Mutex<HashSet<PathBuf>>>,
+    debouncer: &Arc<HotkeyDebouncer>,
+) -> usize {
+    let mut found = 0;
+    for (path, dev) in evdev::enumerate() {
+        if !is_hotkey_keyboard(&dev, target_code) {
+            continue;
+        }
+        {
+            let mut active = active.lock().expect("keyboard active-set lock poisoned");
+            if !active.insert(path.clone()) {
+                continue;
+            }
+        }
+        found += 1;
+        let tx = tx.clone();
+        let active = active.clone();
+        let debouncer = debouncer.clone();
+        std::thread::spawn(move || {
+            run_keyboard_reader(path, dev, target_code, tx, active, debouncer)
+        });
+    }
+    found
+}
+
+fn is_hotkey_keyboard(dev: &evdev::Device, target_code: u16) -> bool {
+    let Some(keys) = dev.supported_keys() else {
+        return false;
+    };
+    let has_target = keys.iter().any(|k| k.code() == target_code);
+    let looks_like_keyboard = keys.contains(KeyCode::KEY_SPACE) && keys.contains(KeyCode::KEY_A);
+    has_target && looks_like_keyboard
+}
+
+fn run_keyboard_reader(
+    path: PathBuf,
+    mut dev: evdev::Device,
+    target_code: u16,
+    tx: UnboundedSender<Control>,
+    active: Arc<Mutex<HashSet<PathBuf>>>,
+    debouncer: Arc<HotkeyDebouncer>,
+) {
+    let name = dev.name().unwrap_or("<unknown>").to_string();
+    info!("hotkey listener attached to {} ({name})", path.display());
+    loop {
+        match dev.fetch_events() {
+            Ok(events) => {
+                for ev in events {
+                    if ev.event_type() == EventType::KEY
+                        && ev.code() == target_code
+                        && ev.value() == 1
+                    {
+                        if debouncer.should_fire(Instant::now()) {
+                            let _ = tx.send(Control::Toggle);
+                        } else {
+                            debug!("ignored duplicate hotkey event within debounce window");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "keyboard reader stopped for {} ({name}): {e}",
+                    path.display()
+                );
+                active
+                    .lock()
+                    .expect("keyboard active-set lock poisoned")
+                    .remove(&path);
+                break;
+            }
+        }
+    }
 }
 
 /// Drive the injector backend on a dedicated thread (called from `inject.rs`).
@@ -168,5 +255,19 @@ impl Paster {
         up.push(*KeyEvent::new(KeyCode::KEY_LEFTCTRL, 0));
         self.device.emit(&up)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hotkey_debouncer_suppresses_duplicate_events_in_window() {
+        let debouncer = HotkeyDebouncer::default();
+        let start = Instant::now();
+        assert!(debouncer.should_fire(start));
+        assert!(!debouncer.should_fire(start + Duration::from_millis(100)));
+        assert!(debouncer.should_fire(start + Duration::from_millis(400)));
     }
 }

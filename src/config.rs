@@ -92,6 +92,8 @@ pub enum Command {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Diagnose keyboard, microphone, display/session, and API prerequisites.
+    Doctor,
 }
 
 #[derive(Subcommand, Debug)]

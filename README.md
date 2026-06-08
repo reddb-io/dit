@@ -49,7 +49,12 @@ irm https://raw.githubusercontent.com/reddb-io/dit/main/install.ps1 | iex
 ```
 
 The installer detects your OS/arch, downloads the matching binary, verifies its `.sha256`, installs
-it (`~/.local/bin` on Unix, `%LOCALAPPDATA%\Programs\dit` on Windows) and puts it on your `PATH`.
+or updates it (`~/.local/bin` on Unix, `%LOCALAPPDATA%\Programs\dit` on Windows) and puts it on
+your `PATH`. If `dit` is already installed, it reads the local `dit --version`, compares it with
+the requested/latest release, skips a no-op reinstall when already current, and updates older local
+binaries in place. On Linux it also restarts an active `dit.service` so the running desktop agent
+picks up the new binary.
+
 It then walks you through the rest interactively: **prompts for your ElevenLabs API key**, offers to
 **install the runtime libraries** (detecting apt/dnf/pacman/zypper), and offers to **set up the
 autostart service** — then smoke-tests that the binary runs.
@@ -131,6 +136,7 @@ dit --keyterm RedDB --keyterm Scribe   # bias toward names/jargon (repeatable)
 dit --vad-silence 0.8            # commit faster on shorter pauses
 dit --region eu                  # EU data residency
 dit --list-devices               # list inputs and exit
+dit doctor                       # diagnose mic/keyboard/session permissions
 ```
 
 Press **F9** → speak → press **F9** again. `Ctrl+C` quits. Crank up logs with `RUST_LOG=dit=debug`.
@@ -148,6 +154,11 @@ Press **F9** → speak → press **F9** again. `Ctrl+C` quits. Crank up logs wit
 | `--no-preview` | off | Disable the live terminal preview |
 | `--env-file` | `~/.dit.env` | Path to the key file |
 | `--list-devices` | — | Print input devices and exit |
+
+`dit` is resilient to desktop hardware churn: on Linux it monitors `/dev/input`
+for keyboards plugged in after startup, debounces duplicate hotkey events from
+multi-event keyboards, ranks real capture devices ahead of noisy ALSA aliases,
+and retries/fails over if a microphone stream disappears.
 
 > [!TIP]
 > For the sharpest transcripts: pass names and jargon with `--keyterm` (e.g. `--keyterm Kubernetes`),
