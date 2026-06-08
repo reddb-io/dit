@@ -139,7 +139,7 @@ dit --list-devices               # list inputs and exit
 dit doctor                       # diagnose mic/keyboard/session permissions
 ```
 
-Press **F9** → speak → press **F9** again. `Ctrl+C` quits. Crank up logs with `RUST_LOG=dit=debug`.
+Press **F9** → speak → press **F9** again. While recording, the tray icon becomes a high-contrast **VU meter**: dark red bars mean silence/no input, green bars mean healthy speech level, and yellow/red bars mean loud input. `Ctrl+C` quits. Crank up logs with `RUST_LOG=dit=debug`.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -221,10 +221,14 @@ This sentence is now committed.  ← locked in, typed into the app + logged
   Voice Activity Detection on each pause. Every one is **typed into the focused app immediately**.
 - Identical consecutive segments are **de-duplicated** so nothing lands twice.
 - On stop, an empty `commit: true` frame **flushes the last open segment**.
+- While audio is streaming, `dit` computes a lightweight RMS level locally and updates the tray icon
+  about 5 times per second as a chunky 5-bar meter. Only the level is used for the icon; no audio is
+  written to disk by default.
 
-Text is **typed as keystrokes**, not pasted via the clipboard — paste bindings aren't universal
-(terminals use `Ctrl+Shift+V`, most apps use `Ctrl+V`), so no single shortcut works everywhere.
-Typing lands in anything that accepts keyboard input and never touches your clipboard.
+Text delivery is platform-specific. On Linux/Wayland, `dit` sets the clipboard and emits the paste
+chord through `/dev/uinput` (`Ctrl+V`, or `Ctrl+Shift+V` with `--paste-shift` for terminals); this
+makes delivery much more reliable than trying to synthesize every character individually. The text is
+also appended to the session log, so a failed paste can still be recovered.
 
 | Concern | Crate | Replaces (`whisperflow.py`) |
 |---|---|---|
