@@ -38,8 +38,8 @@ pub async fn run_session(
     stop: Arc<Notify>,
     state: mpsc::UnboundedSender<IconState>,
 ) -> Result<()> {
-    let _ = state.send(IconState::Recording);
-    let result = session_inner(cfg, injector, stop).await;
+    let _ = state.send(IconState::Recording { level: 0 });
+    let result = session_inner(cfg, injector, stop, state.clone()).await;
     let _ = state.send(if result.is_ok() {
         IconState::Idle
     } else {
@@ -49,7 +49,12 @@ pub async fn run_session(
 }
 
 /// Run one dictation session until `stop` is notified, then drain and close.
-async fn session_inner(cfg: Config, injector: Injector, stop: Arc<Notify>) -> Result<()> {
+async fn session_inner(
+    cfg: Config,
+    injector: Injector,
+    stop: Arc<Notify>,
+    state: mpsc::UnboundedSender<IconState>,
+) -> Result<()> {
     // --- microphone capture on its own thread ---
     let audio_stop = Arc::new(AtomicBool::new(false));
     let (samples_tx, mut samples_rx) =
@@ -215,7 +220,9 @@ async fn session_inner(cfg: Config, injector: Injector, stop: Arc<Notify>) -> Re
                     level.add(&frame);
                     resampler.push(&frame, &mut buf);
                     sent_bytes += flush_chunks(&mut write, &mut buf, chunk_bytes).await?;
-                    level.maybe_log();
+                    if let Some(level) = level.maybe_emit() {
+                        let _ = state.send(IconState::Recording { level });
+                    }
                 }
                 None => break,
             }
@@ -303,11 +310,21 @@ where
     Ok(sent)
 }
 
+fn vu_level_from_rms(rms: f64) -> u8 {
+    if rms <= 0.0005 {
+        return 0;
+    }
+    // Speech RMS values are usually small; square-root compression makes the
+    // tray meter readable without needing exact dB calibration.
+    ((rms.min(0.20) / 0.20).sqrt() * 255.0).round() as u8
+}
+
 #[derive(Default)]
 struct AudioLevel {
     samples: usize,
     sumsq: f64,
     peak: f32,
+    last_emit: Option<std::time::Instant>,
     last_log: Option<std::time::Instant>,
 }
 
@@ -320,22 +337,30 @@ impl AudioLevel {
         }
     }
 
-    fn maybe_log(&mut self) {
+    fn maybe_emit(&mut self) -> Option<u8> {
         let now = std::time::Instant::now();
         if self
-            .last_log
-            .is_some_and(|last| now.duration_since(last) < Duration::from_secs(1))
+            .last_emit
+            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(200))
         {
-            return;
+            return None;
         }
         if self.samples == 0 {
-            return;
+            return None;
         }
         let rms = (self.sumsq / self.samples as f64).sqrt();
-        info!("audio level: rms={rms:.4} peak={:.4}", self.peak);
+        if self
+            .last_log
+            .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(1))
+        {
+            info!("audio level: rms={rms:.4} peak={:.4}", self.peak);
+            self.last_log = Some(now);
+        }
+        let level = vu_level_from_rms(rms);
         self.samples = 0;
         self.sumsq = 0.0;
         self.peak = 0.0;
-        self.last_log = Some(now);
+        self.last_emit = Some(now);
+        Some(level)
     }
 }

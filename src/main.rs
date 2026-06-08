@@ -49,7 +49,7 @@ pub enum Control {
 #[derive(Clone, Copy, Debug)]
 pub enum IconState {
     Idle,
-    Recording,
+    Recording { level: u8 },
     Error,
 }
 
@@ -126,7 +126,7 @@ async fn manager(
 fn disc_rgba(state: IconState) -> (Vec<u8>, u32) {
     let (r, g, b) = match state {
         IconState::Idle => (0x9e, 0x9e, 0x9e),
-        IconState::Recording => (0xe5, 0x39, 0x35),
+        IconState::Recording { .. } => (0xe5, 0x39, 0x35),
         IconState::Error => (0xf5, 0xa6, 0x23),
     };
     const S: usize = 32;
@@ -152,13 +152,66 @@ fn disc_rgba(state: IconState) -> (Vec<u8>, u32) {
             rgba[i + 3] = alpha;
         }
     }
+    if let IconState::Recording { level } = state {
+        draw_vu_meter(&mut rgba, S, level);
+    }
     (rgba, S as u32)
+}
+
+fn vu_bar_count(level: u8) -> usize {
+    if level == 0 {
+        0
+    } else {
+        ((level as usize * 5).div_ceil(255)).clamp(1, 5)
+    }
+}
+
+fn draw_vu_meter(rgba: &mut [u8], size: usize, level: u8) {
+    let bars = vu_bar_count(level);
+    // System trays shrink icons aggressively, so use the whole 32×32 icon as a
+    // fat high-contrast meter instead of tiny bars inside the red disc.
+    let heights = [8usize, 12, 16, 21, 26];
+    for (bar, height) in heights.iter().enumerate() {
+        let x0 = 3 + bar * 6;
+        let y0 = 29usize.saturating_sub(*height);
+        let active = bar < bars;
+        let (r, g, b) = if !active {
+            (0x46, 0x10, 0x10)
+        } else if bar < 3 {
+            (0x38, 0xff, 0x38)
+        } else if bar < 4 {
+            (0xff, 0xe0, 0x40)
+        } else {
+            (0xff, 0x38, 0x38)
+        };
+        for y in y0..29 {
+            for x in x0..x0 + 4 {
+                let i = (y * size + x) * 4;
+                rgba[i] = r;
+                rgba[i + 1] = g;
+                rgba[i + 2] = b;
+                rgba[i + 3] = 255;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn meter_pixel_count(rgba: &[u8]) -> usize {
+    rgba.chunks_exact(4)
+        .filter(|px| {
+            px[3] == 255
+                && ((px[1] > px[0] && px[1] > px[2])
+                    || (px[0] > 0xf0 && px[1] > 0xa0)
+                    || (px[0] > 0xf0 && px[2] > 0x40))
+        })
+        .count()
 }
 
 fn tooltip(state: IconState) -> &'static str {
     match state {
         IconState::Idle => "dit — idle",
-        IconState::Recording => "dit — recording",
+        IconState::Recording { .. } => "dit — recording",
         IconState::Error => "dit — error",
     }
 }
@@ -356,4 +409,26 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
             let _ = tray.set_tooltip(Some(tooltip(state)));
         }
     });
+}
+
+#[cfg(test)]
+mod tray_audio_meter_tests {
+    use super::*;
+
+    #[test]
+    fn vu_meter_maps_quiet_and_loud_levels_to_visible_bar_counts() {
+        assert_eq!(vu_bar_count(0), 0);
+        assert_eq!(vu_bar_count(1), 1);
+        assert_eq!(vu_bar_count(128), 3);
+        assert_eq!(vu_bar_count(255), 5);
+    }
+
+    #[test]
+    fn recording_icon_changes_when_audio_level_changes() {
+        let (quiet, quiet_size) = disc_rgba(IconState::Recording { level: 0 });
+        let (loud, loud_size) = disc_rgba(IconState::Recording { level: 255 });
+        assert_eq!(quiet_size, loud_size);
+        assert_ne!(quiet, loud);
+        assert!(meter_pixel_count(&loud) > meter_pixel_count(&quiet));
+    }
 }
