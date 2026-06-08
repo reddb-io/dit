@@ -1,12 +1,11 @@
 //! Cross-platform microphone capture (replaces `parec` from the original script).
 //!
 //! `cpal` opens the best available input device: an explicit `--device` match,
-//! then PipeWire/default aliases, then hardware devices. The capture runs on its
-//! own thread because a `cpal::Stream` is not `Send`; it pushes bounded mono
-//! `f32` frames into a Tokio channel, and reports sample-rate changes so the
-//! sender side can resample to 16 kHz.
+//! then PipeWire, then real ALSA hardware/plughw devices, and only then the
+//! system default alias. This avoids getting stuck on “default” devices that
+//! open successfully but do not feed CPAL audio on some PipeWire/ALSA setups.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -53,17 +52,20 @@ fn device_rank(
     let default_alias = lower == "default";
     let plughw = lower.starts_with("plughw:");
     let hw = lower.starts_with("hw:");
+    let sysdefault = lower.starts_with("sysdefault:");
 
     let rank = if preferred {
         0
     } else if pipewire {
         1
-    } else if default || default_alias {
-        2
     } else if plughw {
-        3
+        2
     } else if hw {
+        3
+    } else if sysdefault {
         4
+    } else if default || default_alias {
+        6
     } else if bad_alsa_pseudo {
         9
     } else {
@@ -194,55 +196,112 @@ fn open_stream(
     let _ = events_tx.try_send(CaptureEvent::Format { sample_rate });
 
     let stream_failed = Arc::new(AtomicBool::new(false));
+    let callbacks = Arc::new(AtomicU64::new(0));
+    let delivered_samples = Arc::new(AtomicU64::new(0));
+    let dropped_samples = Arc::new(AtomicU64::new(0));
     let failed = stream_failed.clone();
     let device_name = name.to_string();
     let err_fn = move |e| {
         error!("audio stream error on '{device_name}': {e}");
         failed.store(true, Ordering::Relaxed);
     };
-    let tx = events_tx.clone();
 
     // Downmix interleaved frames to mono and forward. try_send intentionally
     // drops frames when the bounded realtime queue is full.
     let stream = match config.sample_format() {
-        SampleFormat::F32 => device.build_input_stream(
-            &config.into(),
-            move |data: &[f32], _| {
-                tx.try_send(CaptureEvent::Samples(downmix(data, channels, |s| s)))
-                    .ok();
-            },
-            err_fn,
-            None,
-        )?,
-        SampleFormat::I16 => device.build_input_stream(
-            &config.into(),
-            move |data: &[i16], _| {
-                tx.try_send(CaptureEvent::Samples(downmix(data, channels, |s| {
-                    s as f32 / i16::MAX as f32
-                })))
-                .ok();
-            },
-            err_fn,
-            None,
-        )?,
-        SampleFormat::U16 => device.build_input_stream(
-            &config.into(),
-            move |data: &[u16], _| {
-                tx.try_send(CaptureEvent::Samples(downmix(data, channels, |s| {
-                    (s as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0)
-                })))
-                .ok();
-            },
-            err_fn,
-            None,
-        )?,
+        SampleFormat::F32 => {
+            let tx = events_tx.clone();
+            let callbacks = callbacks.clone();
+            let delivered_samples = delivered_samples.clone();
+            let dropped_samples = dropped_samples.clone();
+            device.build_input_stream(
+                &config.into(),
+                move |data: &[f32], _| {
+                    callbacks.fetch_add(1, Ordering::Relaxed);
+                    let frame = downmix(data, channels, |s| s);
+                    let len = frame.len() as u64;
+                    if len == 0 {
+                        return;
+                    }
+                    if tx.try_send(CaptureEvent::Samples(frame)).is_ok() {
+                        delivered_samples.fetch_add(len, Ordering::Relaxed);
+                    } else {
+                        dropped_samples.fetch_add(len, Ordering::Relaxed);
+                    }
+                },
+                err_fn,
+                None,
+            )?
+        }
+        SampleFormat::I16 => {
+            let tx = events_tx.clone();
+            let callbacks = callbacks.clone();
+            let delivered_samples = delivered_samples.clone();
+            let dropped_samples = dropped_samples.clone();
+            device.build_input_stream(
+                &config.into(),
+                move |data: &[i16], _| {
+                    callbacks.fetch_add(1, Ordering::Relaxed);
+                    let frame = downmix(data, channels, |s| s as f32 / i16::MAX as f32);
+                    let len = frame.len() as u64;
+                    if len == 0 {
+                        return;
+                    }
+                    if tx.try_send(CaptureEvent::Samples(frame)).is_ok() {
+                        delivered_samples.fetch_add(len, Ordering::Relaxed);
+                    } else {
+                        dropped_samples.fetch_add(len, Ordering::Relaxed);
+                    }
+                },
+                err_fn,
+                None,
+            )?
+        }
+        SampleFormat::U16 => {
+            let tx = events_tx.clone();
+            let callbacks = callbacks.clone();
+            let delivered_samples = delivered_samples.clone();
+            let dropped_samples = dropped_samples.clone();
+            device.build_input_stream(
+                &config.into(),
+                move |data: &[u16], _| {
+                    callbacks.fetch_add(1, Ordering::Relaxed);
+                    let frame = downmix(data, channels, |s| {
+                        (s as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0)
+                    });
+                    let len = frame.len() as u64;
+                    if len == 0 {
+                        return;
+                    }
+                    if tx.try_send(CaptureEvent::Samples(frame)).is_ok() {
+                        delivered_samples.fetch_add(len, Ordering::Relaxed);
+                    } else {
+                        dropped_samples.fetch_add(len, Ordering::Relaxed);
+                    }
+                },
+                err_fn,
+                None,
+            )?
+        }
         other => return Err(anyhow!("unsupported sample format: {other:?}")),
     };
 
     stream
         .play()
         .with_context(|| format!("could not start input stream for '{name}'"))?;
+    let started = std::time::Instant::now();
     while !stop.load(Ordering::Relaxed) && !stream_failed.load(Ordering::Relaxed) {
+        if delivered_samples.load(Ordering::Relaxed) == 0
+            && started.elapsed() > std::time::Duration::from_secs(1)
+        {
+            warn!(
+                "audio stream for '{name}' started but delivered no samples after {} callbacks ({} dropped samples); trying next input device",
+                callbacks.load(Ordering::Relaxed),
+                dropped_samples.load(Ordering::Relaxed)
+            );
+            stream_failed.store(true, Ordering::Relaxed);
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     drop(stream);
@@ -307,7 +366,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ranks_pipewire_and_default_before_noisy_alsa_pseudo_devices() {
+    fn ranks_real_hardware_before_default_alias_and_noisy_alsa_pseudo_devices() {
         let mut names = [
             "surround51:CARD=PCH,DEV=0",
             "hw:CARD=USB,DEV=0",
@@ -318,9 +377,9 @@ mod tests {
         ];
         names.sort_by_key(|name| device_rank(name, None, Some("default"), 0));
         assert_eq!(names[0], "pipewire");
-        assert_eq!(names[1], "default");
-        assert_eq!(names[2], "plughw:CARD=USB,DEV=0");
-        assert_eq!(names[3], "hw:CARD=USB,DEV=0");
+        assert_eq!(names[1], "plughw:CARD=USB,DEV=0");
+        assert_eq!(names[2], "hw:CARD=USB,DEV=0");
+        assert_eq!(names[3], "default");
         assert!(names[4].starts_with("surround") || names[4].starts_with("front"));
     }
 

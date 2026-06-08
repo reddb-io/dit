@@ -8,6 +8,7 @@
 use std::sync::mpsc::{self, Sender};
 
 use anyhow::Result;
+use tracing::{error, info};
 
 pub enum InjectMsg {
     /// Type `text` into whatever app is focused.
@@ -38,7 +39,12 @@ impl Injector {
     }
 
     pub fn type_text(&self, text: String) {
-        let _ = self.tx.send(InjectMsg::Type(text));
+        let chars = text.chars().count();
+        let bytes = text.len();
+        match self.tx.send(InjectMsg::Type(text)) {
+            Ok(()) => info!("delivery queued: {chars} chars, {bytes} bytes"),
+            Err(e) => error!("delivery queue failed: injector thread is gone: {e}"),
+        }
     }
 }
 
@@ -56,10 +62,12 @@ fn run_enigo(rx: std::sync::mpsc::Receiver<InjectMsg>) {
         }
     };
     while let Ok(InjectMsg::Type(text)) = rx.recv() {
+        let chars = text.chars().count();
         if let Err(e) = enigo.text(&text) {
-            error!("type failed: {e}");
+            error!("delivery failed: enigo text input failed ({chars} chars): {e}");
         } else {
             debug!("typed: {text}");
+            info!("delivery emitted: enigo text input ({chars} chars)");
         }
     }
 }

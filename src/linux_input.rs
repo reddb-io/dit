@@ -185,10 +185,19 @@ pub fn run_injector(rx: Receiver<InjectMsg>, shift: bool) {
         }
     };
     while let Ok(InjectMsg::Type(text)) = rx.recv() {
+        let chars = text.chars().count();
+        info!(
+            "delivery started: clipboard + {} paste chord ({chars} chars)",
+            if shift { "Ctrl+Shift+V" } else { "Ctrl+V" }
+        );
         if let Err(e) = paster.paste(&text) {
-            error!("paste failed: {e}");
+            error!("delivery failed: clipboard/uinput paste failed ({chars} chars): {e:#}");
         } else {
             debug!("pasted: {text}");
+            info!(
+                "delivery emitted: clipboard set and {} paste chord sent ({chars} chars)",
+                if shift { "Ctrl+Shift+V" } else { "Ctrl+V" }
+            );
         }
     }
 }
@@ -234,11 +243,26 @@ impl Paster {
         self.clipboard
             .set_text(text.to_string())
             .context("could not set the clipboard")?;
+        match self.clipboard.get_text() {
+            Ok(current) if current == text => {
+                info!("delivery checkpoint: clipboard readback matched")
+            }
+            Ok(current) => warn!(
+                "delivery checkpoint: clipboard readback mismatch (wanted {} bytes, got {} bytes)",
+                text.len(),
+                current.len()
+            ),
+            Err(e) => warn!("delivery checkpoint: clipboard readback failed: {e}"),
+        }
         std::thread::sleep(Duration::from_millis(40));
         self.emit_paste()
     }
 
     fn emit_paste(&mut self) -> Result<()> {
+        info!(
+            "delivery checkpoint: emitting {} via /dev/uinput",
+            if self.shift { "Ctrl+Shift+V" } else { "Ctrl+V" }
+        );
         let mut down = vec![*KeyEvent::new(KeyCode::KEY_LEFTCTRL, 1)];
         if self.shift {
             down.push(*KeyEvent::new(KeyCode::KEY_LEFTSHIFT, 1));

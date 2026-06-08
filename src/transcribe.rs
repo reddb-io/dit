@@ -124,7 +124,11 @@ async fn session_inner(cfg: Config, injector: Injector, stop: Arc<Notify>) -> Re
                     // This segment is now committed, so the previewed tail is
                     // accounted for — drop it from the recovery buffer.
                     pending.clear();
-                    if text.is_empty() || text == last_committed {
+                    if text.is_empty() {
+                        warn!("committed empty transcript (audio received, but no recognizable speech)");
+                        continue;
+                    }
+                    if text == last_committed {
                         continue;
                     }
                     last_committed = text.to_string();
@@ -184,9 +188,21 @@ async fn session_inner(cfg: Config, injector: Injector, stop: Arc<Notify>) -> Re
 
     // --- sender: stream audio until stopped, then flush a final commit ---
     let mut buf: Vec<u8> = Vec::with_capacity(chunk_bytes * 2);
+    let mut sent_bytes: usize = 0;
+    let mut sample_events: usize = 0;
+    let mut warned_no_audio = false;
+    let mut level = AudioLevel::default();
     loop {
         tokio::select! {
             _ = stop.notified() => break,
+            _ = tokio::time::sleep(Duration::from_secs(1)), if sent_bytes == 0 && !warned_no_audio => {
+                warned_no_audio = true;
+                warn!("audio capture opened, but no sample frames have reached the WebSocket yet");
+                notify(
+                    "dit — no audio frames yet",
+                    "Microphone opened, but dit has not received samples from CPAL/PipeWire",
+                );
+            }
             maybe = samples_rx.recv() => match maybe {
                 Some(CaptureEvent::Format { sample_rate }) => {
                     if sample_rate != native_rate {
@@ -195,8 +211,11 @@ async fn session_inner(cfg: Config, injector: Injector, stop: Arc<Notify>) -> Re
                     resampler = Resampler::new(sample_rate, SAMPLE_RATE);
                 }
                 Some(CaptureEvent::Samples(frame)) => {
+                    sample_events += 1;
+                    level.add(&frame);
                     resampler.push(&frame, &mut buf);
-                    flush_chunks(&mut write, &mut buf, chunk_bytes).await?;
+                    sent_bytes += flush_chunks(&mut write, &mut buf, chunk_bytes).await?;
+                    level.maybe_log();
                 }
                 None => break,
             }
@@ -210,10 +229,24 @@ async fn session_inner(cfg: Config, injector: Injector, stop: Arc<Notify>) -> Re
             CaptureEvent::Format { sample_rate } => {
                 resampler = Resampler::new(sample_rate, SAMPLE_RATE);
             }
-            CaptureEvent::Samples(frame) => resampler.push(&frame, &mut buf),
+            CaptureEvent::Samples(frame) => {
+                sample_events += 1;
+                level.add(&frame);
+                resampler.push(&frame, &mut buf);
+            }
         }
     }
-    flush_chunks(&mut write, &mut buf, 1).await?; // flush remainder
+    sent_bytes += flush_chunks(&mut write, &mut buf, 1).await?; // flush remainder
+    info!(
+        "audio sent: {:.1}s ({sent_bytes} bytes pcm16 @ {SAMPLE_RATE} Hz, {sample_events} sample callbacks)",
+        sent_bytes as f64 / (SAMPLE_RATE as f64 * 2.0)
+    );
+    if sent_bytes == 0 {
+        notify(
+            "dit — no audio sent",
+            "Recording stopped before any audio reached Scribe; check PipeWire/CPAL callback logs",
+        );
+    }
 
     // Force a commit of the last open segment (VAD may not have closed it).
     let _ = write
@@ -240,12 +273,13 @@ async fn session_inner(cfg: Config, injector: Injector, stop: Arc<Notify>) -> Re
 
 /// Send full `chunk_bytes`-sized audio frames out of `buf`. When `chunk_bytes`
 /// is 1 (flush remainder), send whatever is left.
-async fn flush_chunks<S>(write: &mut S, buf: &mut Vec<u8>, chunk_bytes: usize) -> Result<()>
+async fn flush_chunks<S>(write: &mut S, buf: &mut Vec<u8>, chunk_bytes: usize) -> Result<usize>
 where
     S: SinkExt<Message> + Unpin,
     <S as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
 {
     let threshold = chunk_bytes.max(1);
+    let mut sent = 0;
     while buf.len() >= threshold && !buf.is_empty() {
         let take = if chunk_bytes <= 1 {
             buf.len()
@@ -261,9 +295,47 @@ where
         })
         .to_string();
         write.send(Message::text(payload)).await?;
+        sent += chunk.len();
         if chunk_bytes <= 1 {
             break;
         }
     }
-    Ok(())
+    Ok(sent)
+}
+
+#[derive(Default)]
+struct AudioLevel {
+    samples: usize,
+    sumsq: f64,
+    peak: f32,
+    last_log: Option<std::time::Instant>,
+}
+
+impl AudioLevel {
+    fn add(&mut self, samples: &[f32]) {
+        for &sample in samples {
+            self.samples += 1;
+            self.sumsq += (sample as f64) * (sample as f64);
+            self.peak = self.peak.max(sample.abs());
+        }
+    }
+
+    fn maybe_log(&mut self) {
+        let now = std::time::Instant::now();
+        if self
+            .last_log
+            .is_some_and(|last| now.duration_since(last) < Duration::from_secs(1))
+        {
+            return;
+        }
+        if self.samples == 0 {
+            return;
+        }
+        let rms = (self.sumsq / self.samples as f64).sqrt();
+        info!("audio level: rms={rms:.4} peak={:.4}", self.peak);
+        self.samples = 0;
+        self.sumsq = 0.0;
+        self.peak = 0.0;
+        self.last_log = Some(now);
+    }
 }

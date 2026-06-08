@@ -183,19 +183,20 @@ impl Config {
 
     /// Build the Scribe realtime WebSocket URL.
     ///
-    /// We always send 16 kHz mono PCM (`audio_format=pcm_16000`) because the
+    /// We always send 16 kHz mono PCM (`encoding=pcm_16000`) because the
     /// capture pipeline resamples to that rate, and use VAD-based commits so the
     /// server closes segments on natural pauses.
     pub fn ws_url(&self) -> String {
         let mut url = format!(
             "wss://{}/v1/speech-to-text/realtime\
-             ?model_id={}&language_code={}&audio_format=pcm_{}\
-             &commit_strategy=vad&vad_silence_threshold_secs={}",
+             ?model_id={}&encoding=pcm_{}&sample_rate={}\
+             &commit_strategy=vad&vad_silence_threshold_secs={}&language_code={}",
             self.host(),
             self.model,
-            self.language,
+            SAMPLE_RATE,
             SAMPLE_RATE,
             self.vad_silence,
+            self.language,
         );
         if self.no_filler {
             url.push_str("&no_verbatim=true");
