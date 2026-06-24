@@ -94,6 +94,18 @@ pub enum Command {
     },
     /// Diagnose keyboard, microphone, display/session, and API prerequisites.
     Doctor,
+    /// Update dit to the latest release (idempotent: a no-op when current).
+    Update {
+        /// Only report whether a newer release exists; install nothing.
+        #[arg(long)]
+        check: bool,
+        /// Reinstall even when the target version is already present.
+        #[arg(long)]
+        force: bool,
+        /// Install a specific release tag (e.g. v0.2.4) instead of the latest.
+        #[arg(long)]
+        version: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

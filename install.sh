@@ -15,8 +15,16 @@
 #   --no-service           never install the service
 #   --skip-deps            don't touch system runtime libraries
 #   --force                reinstall even if the requested version is already present
+#   --static               force the fully-static (musl) build, even on a glibc host
+#   --check-only           report whether an update is available, then exit
 #   --yes, -y              non-interactive: accept defaults, no prompts
 #   -h, --help             show this help
+#
+# Linux binaries are portable across distro versions. The default asset is built
+# against an old glibc floor (>= 2.28 — every Ubuntu since 18.04, Debian 10+),
+# so a single binary runs on 20.04/22.04/24.04/26.04 alike. When the host glibc
+# is older than that, or absent (a musl distro like Alpine), the installer
+# automatically falls back to the fully-static `-static` build.
 #
 set -euo pipefail
 
@@ -29,6 +37,12 @@ ASSUME_YES=false
 WANT_SERVICE="ask"   # ask | yes | no
 SKIP_DEPS=false
 FORCE=false
+FORCE_STATIC=false
+CHECK_ONLY=false
+
+# Lowest glibc version the default (non-static) Linux assets are built against.
+# Must match the zigbuild target floor in .github/workflows/release.yml.
+GLIBC_FLOOR="2.28"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,8 +53,10 @@ while [[ $# -gt 0 ]]; do
     --no-service)   WANT_SERVICE="no"; shift ;;
     --skip-deps)    SKIP_DEPS=true; shift ;;
     --force)        FORCE=true; shift ;;
+    --static)       FORCE_STATIC=true; shift ;;
+    --check-only)   CHECK_ONLY=true; shift ;;
     -y|--yes)       ASSUME_YES=true; shift ;;
-    -h|--help)      sed -n '2,20p' "$0" 2>/dev/null || true; exit 0 ;;
+    -h|--help)      sed -n '2,27p' "$0" 2>/dev/null || true; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -75,14 +91,21 @@ confirm() { # confirm "Question?" default(yes/no) → return 0 if yes
 
 # --- pick a downloader ------------------------------------------------------
 if command -v curl >/dev/null 2>&1; then
-  dl()    { curl -fsSL "$1"; }
-  dl_to() { curl -fL  -o "$2" "$1"; }
+  dl()      { curl -fsSL "$1"; }
+  dl_to()   { curl -fL  -o "$2" "$1"; }
+  dl_head() { curl -fsSIL -o /dev/null "$1"; }   # success iff the URL exists
 elif command -v wget >/dev/null 2>&1; then
-  dl()    { wget -qO- "$1"; }
-  dl_to() { wget -qO  "$2" "$1"; }
+  dl()      { wget -qO- "$1"; }
+  dl_to()   { wget -qO  "$2" "$1"; }
+  dl_head() { wget -q --spider "$1"; }
 else
   die "curl or wget is required"
 fi
+
+# Does a release asset exist for the resolved tag?
+asset_exists() {
+  dl_head "https://github.com/${REPO}/releases/download/${RELEASE_TAG}/$1" 2>/dev/null
+}
 
 # --- detect platform → matches the release asset names ----------------------
 detect_platform() {
@@ -95,13 +118,71 @@ detect_platform() {
     *) die "Unsupported OS: $os" ;;
   esac
   case "$arch" in
-    x86_64|amd64)  ARCH="x86_64" ;;
-    aarch64|arm64) ARCH="aarch64" ;;
-    *) die "Unsupported architecture: $arch (prebuilt binaries cover x86_64 and aarch64)" ;;
+    x86_64|amd64)        ARCH="x86_64" ;;
+    aarch64|arm64)       ARCH="aarch64" ;;
+    armv7l|armv7|armhf)  ARCH="armv7" ;;
+    *) die "Unsupported architecture: $arch (prebuilt binaries cover x86_64, aarch64 and armv7)" ;;
   esac
   PLATFORM="${OS}-${ARCH}"
   EXT=""
   if [[ "$OS" == "windows" ]]; then EXT=".exe"; fi
+}
+
+# Detect the host glibc version (e.g. "2.35"), or empty on a musl/non-glibc host.
+detect_glibc() {
+  local v=""
+  # ldd --version is the most portable probe; musl prints "musl libc" instead.
+  if command -v ldd >/dev/null 2>&1; then
+    local out; out="$(ldd --version 2>&1 | head -1)"
+    if printf '%s' "$out" | grep -qi musl; then printf ''; return; fi
+    v="$(printf '%s' "$out" | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+  fi
+  if [[ -z "$v" ]] && command -v getconf >/dev/null 2>&1; then
+    v="$(getconf GNU_LIBC_VERSION 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+  fi
+  printf '%s' "$v"
+}
+
+# True (0) when version $1 is strictly older than $2.
+version_lt() {
+  [[ "$1" == "$2" ]] && return 1
+  local first; first="$(printf '%s\n%s\n' "$1" "$2" | sort -V 2>/dev/null | head -n1)"
+  [[ "$first" == "$1" ]]
+}
+
+# Pick the best Linux asset: the portable glibc build by default, the
+# fully-static (musl) build when the host glibc is too old / absent / forced.
+# Sets ASSET and VARIANT. macOS and Windows ship a single asset per platform.
+choose_asset() {
+  local base="${BINARY_NAME}-${PLATFORM}${EXT}"
+  if [[ "$OS" != "linux" ]]; then ASSET="$base"; VARIANT="native"; return; fi
+
+  local static="${BINARY_NAME}-${PLATFORM}-static"
+  local glibc; glibc="$(detect_glibc)"
+  local want_static=false reason=""
+  if [[ "$FORCE_STATIC" == true ]]; then
+    want_static=true; reason="forced with --static"
+  elif [[ -z "$glibc" ]]; then
+    want_static=true; reason="no glibc detected (musl host?)"
+  elif version_lt "$glibc" "$GLIBC_FLOOR"; then
+    want_static=true; reason="host glibc ${glibc} < ${GLIBC_FLOOR}"
+  fi
+
+  if [[ "$want_static" == true ]]; then
+    if asset_exists "$static"; then
+      say "selecting the static build (${reason})"
+      ASSET="$static"; VARIANT="static"; return
+    fi
+    warn "no static build published for ${PLATFORM}; falling back to the glibc build"
+    ASSET="$base"; VARIANT="glibc"; return
+  fi
+
+  if asset_exists "$base"; then ASSET="$base"; VARIANT="glibc"; return; fi
+  if asset_exists "$static"; then
+    warn "no glibc build for ${PLATFORM}; using the static build"
+    ASSET="$static"; VARIANT="static"; return
+  fi
+  ASSET="$base"; VARIANT="glibc"   # let the download step report the 404
 }
 
 resolve_tag() {
@@ -214,22 +295,30 @@ restart_existing_service() {
 # external library it needs is libasound, which every desktop already ships.
 linux_deps() {
   [[ "$OS" == "linux" && "$SKIP_DEPS" == false ]] || return 0
+  # The static (musl) build links libasound in; nothing to install.
+  [[ "${VARIANT:-}" == "static" ]] && { ok "static build — no runtime libraries needed"; return 0; }
 
   if command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q libasound.so.2; then
     ok "runtime libraries present"; return 0
   fi
+  # dit's one and only runtime dependency is the ALSA shared library
+  # (libasound2). The `-static` build avoids even this — see the hints below.
   local pm="" cmd=""
   if   command -v apt-get >/dev/null 2>&1; then pm=apt;    cmd="sudo apt-get install -y libasound2"
   elif command -v dnf     >/dev/null 2>&1; then pm=dnf;    cmd="sudo dnf install -y alsa-lib"
   elif command -v pacman  >/dev/null 2>&1; then pm=pacman; cmd="sudo pacman -S --needed --noconfirm alsa-lib"
   elif command -v zypper  >/dev/null 2>&1; then pm=zypper; cmd="sudo zypper install -y libasound2"
-  else warn "install your distro's ALSA runtime (libasound)"; return 0; fi
-
-  warn "missing libasound"
-  if [[ "$ASSUME_YES" == true ]] || confirm "Install it now with $pm?" yes; then
-    say "running: $cmd"; eval "$cmd" || warn "install failed — run manually:\n  $cmd"
   else
-    warn "skipped — install later with:\n  $cmd"
+    warn "dit needs the ALSA runtime library (libasound2) — install your distro's package, or\n      re-run with --static for the dependency-free build:\n        ${BINARY_NAME} update --force   # if dit is already installed\n        curl -fsSL .../install.sh | bash -s -- --static"
+    return 0
+  fi
+
+  warn "missing libasound2 — dit's only runtime dependency"
+  if [[ "$ASSUME_YES" == true ]] || confirm "Install it now with $pm?" yes; then
+    say "running: $cmd"
+    eval "$cmd" || warn "install failed — run it manually:\n      $cmd\n      …or use the dependency-free static build: re-run install.sh with --static"
+  else
+    warn "skipped — install later with:\n      $cmd\n      …or skip it entirely with the static build: re-run install.sh with --static"
   fi
 }
 
@@ -283,13 +372,45 @@ setup_api_key() {
   warn "no API key set yet — add it later:\n  echo 'ELEVENLABS_API_KEY=sk_your_key' > $env_file"
 }
 
+# --check-only: report whether a newer release exists, then exit without
+# touching anything on disk. Backs `dit update --check`.
+report_update_status() {
+  local dest="$1" target existing existing_ver cmp
+  target="$(normalize_version "$RELEASE_TAG")"
+  existing="$(find_existing_binary "$dest" || true)"
+  if [[ -z "$existing" ]]; then
+    say "dit is not installed; latest release is ${RELEASE_TAG}"
+    return 0
+  fi
+  existing_ver="$(version_of "$existing" || true)"
+  if [[ -z "$existing_ver" ]]; then
+    say "found dit at ${existing} (version unknown); latest is ${RELEASE_TAG}"
+    return 0
+  fi
+  cmp="$(compare_versions "$existing_ver" "$target")"
+  if [[ "$cmp" == "0" ]]; then
+    ok "dit ${existing_ver} is already the latest release — nothing to update"
+  elif [[ "$cmp" == "-1" ]]; then
+    say "update available: ${existing_ver} → ${target} (run without --check-only to install)"
+  else
+    say "installed dit ${existing_ver} is newer than the latest release ${target}"
+  fi
+}
+
 main() {
   detect_platform
   resolve_tag
 
-  local asset="${BINARY_NAME}-${PLATFORM}${EXT}"
-  local url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${asset}"
   local dest="${INSTALL_DIR}/${BINARY_NAME}${EXT}"
+
+  if [[ "$CHECK_ONLY" == true ]]; then
+    report_update_status "$dest"
+    exit 0
+  fi
+
+  choose_asset
+  local asset="$ASSET"
+  local url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${asset}"
   ALREADY_CURRENT=false
 
   maybe_report_existing "$dest"
@@ -298,7 +419,7 @@ main() {
     local tmp; tmp="$(mktemp)"
     trap 'rm -f "$tmp"' EXIT
 
-    say "installing ${BINARY_NAME} ${RELEASE_TAG} (${PLATFORM})"
+    say "installing ${BINARY_NAME} ${RELEASE_TAG} (${PLATFORM}, ${VARIANT})"
     dl_to "$url" "$tmp" || die "Download failed: $url
 This platform may not have a prebuilt binary — build from source instead (see the README)."
     verify_checksum "$tmp" "$asset"

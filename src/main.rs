@@ -26,6 +26,7 @@ mod notify;
 mod output;
 mod service;
 mod transcribe;
+mod update;
 
 use std::sync::Arc;
 
@@ -71,6 +72,18 @@ fn main() -> Result<()> {
     }
     if let Some(Command::Doctor) = &cli.command {
         return doctor::run(cli.device.clone());
+    }
+    if let Some(Command::Update {
+        check,
+        force,
+        version,
+    }) = &cli.command
+    {
+        return update::run(&update::UpdateArgs {
+            check: *check,
+            force: *force,
+            version: version.clone(),
+        });
     }
     if cli.list_devices {
         return audio::list_devices();

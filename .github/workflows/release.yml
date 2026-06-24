@@ -86,39 +86,105 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64: native compile on a Blacksmith 8-vCPU runner.
-          - { os: blacksmith-8vcpu-ubuntu-2404,     target: x86_64-unknown-linux-gnu,  asset_name: linux-x86_64,  cross: false }
-          # Linux aarch64: build natively on a Blacksmith ARM runner (no cross gcc).
-          - { os: blacksmith-8vcpu-ubuntu-2404-arm, target: aarch64-unknown-linux-gnu, asset_name: linux-aarch64, cross: false }
-          # macOS: native ARM, cross-built Intel from the same ARM pool.
-          - { os: macos-14,       target: aarch64-apple-darwin,  asset_name: macos-aarch64,  cross: false, optional: true }
-          - { os: macos-14,       target: x86_64-apple-darwin,   asset_name: macos-x86_64,   cross: true,  smoke: false, optional: true }
-          # Windows x86_64.
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, cross: false, optional: true }
+          # ---- Linux: portable glibc builds via cargo-zigbuild ----------------
+          # zig links against an OLD glibc floor (.2.28), so one binary runs on
+          # every Ubuntu since 18.04 / Debian 10+ regardless of the runner's own
+          # (newer) glibc. libasound stays dynamically resolved on the host.
+          - { os: blacksmith-8vcpu-ubuntu-2404,     kind: zig,  target: x86_64-unknown-linux-gnu,        zig_target: x86_64-unknown-linux-gnu.2.28,        asset_name: linux-x86_64 }
+          # aarch64 builds natively on a Blacksmith ARM runner (no cross gcc).
+          - { os: blacksmith-8vcpu-ubuntu-2404-arm, kind: zig,  target: aarch64-unknown-linux-gnu,       zig_target: aarch64-unknown-linux-gnu.2.28,       asset_name: linux-aarch64 }
+          # armv7 (32-bit ARM) cross-compiled from x86_64 — best-effort.
+          - { os: blacksmith-8vcpu-ubuntu-2404,     kind: zig,  target: armv7-unknown-linux-gnueabihf,   zig_target: armv7-unknown-linux-gnueabihf.2.28,   asset_name: linux-armv7,  arm_cross: true, smoke: false, optional: true }
+
+          # ---- Linux: fully-static musl builds (run anywhere, even sans glibc)-
+          # ALSA is statically linked into the binary inside the musl container.
+          # Best-effort: failures here never block the release (the zig builds
+          # already cover every modern distro); the installer falls back to them.
+          - { os: blacksmith-8vcpu-ubuntu-2404,     kind: musl, target: x86_64-unknown-linux-musl,       musl_image: x86_64-musl,  musl_host: x86_64-linux-musl,  asset_name: linux-x86_64-static,  optional: true }
+          - { os: blacksmith-8vcpu-ubuntu-2404,     kind: musl, target: aarch64-unknown-linux-musl,      musl_image: aarch64-musl, musl_host: aarch64-linux-musl, asset_name: linux-aarch64-static, smoke: false, optional: true }
+
+          # ---- macOS: native ARM, cross-built Intel from the same ARM pool ----
+          - { os: macos-14,       kind: native, target: aarch64-apple-darwin,  asset_name: macos-aarch64,  optional: true }
+          - { os: macos-14,       kind: native, target: x86_64-apple-darwin,   asset_name: macos-x86_64,   smoke: false, optional: true }
+          # ---- Windows x86_64 ------------------------------------------------
+          - { os: windows-latest, kind: native, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, optional: true }
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
+      # zig builds need libasound for the target arch (alsa-sys probes it via
+      # pkg-config). x86_64/aarch64 use the native dev package; armv7 pulls the
+      # armhf one through a foreign dpkg architecture.
+      - name: Install ALSA dev (native arch)
+        if: matrix.kind == 'zig' && !matrix.arm_cross
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev pkg-config
 
+      - name: Install ALSA dev (armhf cross)
+        if: matrix.kind == 'zig' && matrix.arm_cross
+        run: |
+          sudo dpkg --add-architecture armhf
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev:armhf
+
       - uses: dtolnay/rust-toolchain@1.95.0
+        if: matrix.kind != 'musl'
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install cargo-zigbuild
+        if: matrix.kind == 'zig'
+        run: pipx install cargo-zigbuild
+
       - uses: Swatinem/rust-cache@v2
+        if: matrix.kind != 'musl'
         with:
           shared-key: release-${{ matrix.target }}
           cache-on-failure: "true"
 
-      - name: Build
-        run: cargo build --locked --release --target ${{ matrix.target }} --bin dit
+      # --- glibc-portable build (zig) -------------------------------------------
+      - name: Build (zigbuild)
+        if: matrix.kind == 'zig'
+        env:
+          # Cross-link armv7 against the armhf libasound in the foreign sysroot.
+          PKG_CONFIG_ALLOW_CROSS: ${{ matrix.arm_cross && '1' || '' }}
+          PKG_CONFIG_PATH: ${{ matrix.arm_cross && '/usr/lib/arm-linux-gnueabihf/pkgconfig' || '' }}
+        run: cargo zigbuild --locked --release --target ${{ matrix.zig_target }} --bin dit
 
-      - name: Strip (Linux native)
-        if: runner.os == 'Linux'
-        run: strip target/${{ matrix.target }}/release/dit
+      # --- static musl build (Docker) ------------------------------------------
+      - name: Build (musl + static ALSA)
+        if: matrix.kind == 'musl'
+        env:
+          MUSL_IMAGE: ${{ matrix.musl_image }}
+          MUSL_HOST: ${{ matrix.musl_host }}
+          MUSL_TARGET: ${{ matrix.target }}
+        run: |
+          docker run --rm -v "${PWD}:/volume" -w /volume \
+            -e MUSL_HOST -e MUSL_TARGET \
+            "messense/rust-musl-cross:${MUSL_IMAGE}" bash -lc '
+              set -euo pipefail
+              rm -f rust-toolchain.toml
+              # Build a static libasound for the musl target so alsa-sys links it in.
+              ALSA_VER=1.2.11
+              curl -sSL "https://www.alsa-project.org/files/pub/lib/alsa-lib-${ALSA_VER}.tar.bz2" -o /tmp/alsa.tar.bz2
+              mkdir -p /tmp/alsa && tar xf /tmp/alsa.tar.bz2 -C /tmp/alsa --strip-components=1
+              cd /tmp/alsa
+              ./configure --host="${MUSL_HOST}" --enable-static --disable-shared \
+                --disable-python --without-debug --prefix=/musl-alsa CC="${TARGET_CC:-${MUSL_HOST}-gcc}"
+              make -j"$(nproc)" >/dev/null && make install >/dev/null
+              cd /volume
+              export PKG_CONFIG_PATH=/musl-alsa/lib/pkgconfig
+              export PKG_CONFIG_ALLOW_CROSS=1
+              export ALSA_STATIC=1
+              export RUSTFLAGS="-C target-feature=+crt-static"
+              cargo build --locked --release --target "${MUSL_TARGET}" --bin dit
+            '
+          sudo chown -R "$(id -u):$(id -g)" "target/${{ matrix.target }}"
+
+      # --- native build (macOS / Windows) --------------------------------------
+      - name: Build (native)
+        if: matrix.kind == 'native'
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin dit
 
       - name: Package asset
         shell: bash
@@ -130,7 +196,7 @@ jobs:
             || certutil -hashfile "${ASSET}" SHA256 > "${ASSET}.sha256"
 
       - name: Smoke test
-        if: ${{ !matrix.cross && matrix.smoke != false }}
+        if: ${{ matrix.smoke != false }}
         shell: bash
         run: |
           EXT=""; [[ "${{ matrix.target }}" == *windows* ]] && EXT=".exe"
@@ -198,6 +264,9 @@ jobs:
           irm https://raw.githubusercontent.com/${REPO}/main/install.ps1 | iex
           \`\`\`
 
+          Already installed? \`dit update\` refreshes to the latest release (and is a
+          no-op when you're already current; \`dit update --check\` only reports).
+
           Or download a binary directly, make it executable, and put it on your \`PATH\`:
 
           **Linux (x86_64):**
@@ -210,13 +279,19 @@ jobs:
           curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/dit-linux-aarch64 -o dit && chmod +x dit
           \`\`\`
 
+          The Linux \`x86_64\`/\`aarch64\`/\`armv7\` builds are glibc-portable (built against
+          glibc 2.28 — runs on every Ubuntu since 18.04). On a glibc older than that, or a
+          musl distro (Alpine), grab the fully-static variant instead:
+          \`dit-linux-x86_64-static\` / \`dit-linux-aarch64-static\`. The install script
+          and \`dit update\` pick the right one for your host automatically.
+
           **macOS (Apple Silicon):**
           \`\`\`bash
           curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/dit-macos-aarch64 -o dit && chmod +x dit
           xattr -d com.apple.quarantine dit   # clear Gatekeeper
           \`\`\`
 
-          **macOS (Intel):** \`dit-macos-x86_64\` · **Windows:** \`dit-windows-x86_64.exe\`
+          **macOS (Intel):** \`dit-macos-x86_64\` · **Linux (armv7):** \`dit-linux-armv7\` · **Windows:** \`dit-windows-x86_64.exe\`
 
           Each asset ships a \`.sha256\` sidecar — verify with \`shasum -a 256 -c dit-<asset>.sha256\`.
 

@@ -48,12 +48,12 @@ curl -fsSL https://raw.githubusercontent.com/reddb-io/dit/main/install.sh | bash
 irm https://raw.githubusercontent.com/reddb-io/dit/main/install.ps1 | iex
 ```
 
-The installer detects your OS/arch, downloads the matching binary, verifies its `.sha256`, installs
-or updates it (`~/.local/bin` on Unix, `%LOCALAPPDATA%\Programs\dit` on Windows) and puts it on
-your `PATH`. If `dit` is already installed, it reads the local `dit --version`, compares it with
-the requested/latest release, skips a no-op reinstall when already current, and updates older local
-binaries in place. On Linux it also restarts an active `dit.service` so the running desktop agent
-picks up the new binary.
+The installer detects your OS/arch, picks the **best build for your host** (see below), downloads
+the matching binary, verifies its `.sha256`, installs or updates it (`~/.local/bin` on Unix,
+`%LOCALAPPDATA%\Programs\dit` on Windows) and puts it on your `PATH`. If `dit` is already installed,
+it reads the local `dit --version`, compares it with the requested/latest release, skips a no-op
+reinstall when already current, and updates older local binaries in place. On Linux it also restarts
+an active `dit.service` so the running desktop agent picks up the new binary.
 
 It then walks you through the rest interactively: **prompts for your ElevenLabs API key**, offers to
 **install the runtime libraries** (detecting apt/dnf/pacman/zypper), and offers to **set up the
@@ -67,6 +67,30 @@ curl -fsSL .../install.sh | bash -s -- --version v0.1.0
 curl -fsSL .../install.sh | bash -s -- --install-dir /usr/local/bin --skip-deps --no-service
 ```
 
+### Staying up to date — `dit update`
+
+Once installed, dit upgrades itself. **`dit update`** is a first-class, self-contained command — no
+`curl | bash`, no re-running the installer:
+
+```bash
+dit update            # upgrade to the latest release (no-op if already current)
+dit update --check    # just report whether a newer version exists
+dit update --force    # re-download and reinstall the current version
+dit update --version v0.2.4   # pin a specific release
+```
+
+What it does, end to end:
+
+- **Resolves** the latest release from the GitHub API (or the tag you pin).
+- **Picks the right asset for *this* host** — correct arch, and the glibc-portable vs. fully-static
+  `-static` variant inferred from how the running binary itself was built.
+- **Downloads over HTTPS** (rustls, no system OpenSSL) and **verifies the published `SHA-256`** before
+  touching anything — a mismatch aborts the update.
+- **Atomically replaces the running executable** in place (safe on Windows too), then on Linux
+  **restarts an active `dit.service`** so the desktop agent picks up the new binary.
+- **Idempotent:** running it twice in a row just prints *"already the latest release — nothing to
+  update."*
+
 ### Manual download
 
 Grab the binary for your platform from the [**Releases**](https://github.com/reddb-io/dit/releases) page:
@@ -75,6 +99,9 @@ Grab the binary for your platform from the [**Releases**](https://github.com/red
 |---|---|
 | Linux x86_64 | `dit-linux-x86_64` |
 | Linux aarch64 | `dit-linux-aarch64` |
+| Linux armv7 (32-bit ARM) | `dit-linux-armv7` |
+| Linux x86_64 — fully static | `dit-linux-x86_64-static` |
+| Linux aarch64 — fully static | `dit-linux-aarch64-static` |
 | macOS Apple Silicon | `dit-macos-aarch64` |
 | macOS Intel | `dit-macos-x86_64` |
 | Windows x86_64 | `dit-windows-x86_64.exe` |
@@ -87,9 +114,23 @@ chmod +x dit && sudo mv dit /usr/local/bin/
 Every asset ships a `.sha256` sidecar — verify with `shasum -a 256 -c dit-<asset>.sha256`.
 
 > [!NOTE]
-> The prebuilt Linux binary is **self-contained** — the only shared library it needs is
-> `libasound2` (audio), which every desktop already has. No `libxdo`, `wl-clipboard`, GTK or
-> appindicator. macOS and Windows need nothing extra.
+> **Distro-portable by design.** The default Linux `x86_64`/`aarch64`/`armv7` binaries are built
+> with [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) against an **old glibc floor
+> (2.28)**, so a *single* binary runs on every Ubuntu since 18.04 (20.04 / 22.04 / 24.04 / 26.04) and
+> Debian 10+ — no more "version `GLIBC_2.39' not found" when you move between releases. If your host
+> glibc is older than 2.28, or you're on a musl distro like Alpine, grab the `*-static` variant
+> instead (ALSA is linked in, so it needs nothing on the system). The install script and `dit update`
+> detect this and pick the right one for you automatically.
+
+> [!NOTE]
+> **Dependencies — there's essentially one, and the installer handles it.** The prebuilt Linux
+> binary is self-contained: its *only* runtime dependency is the ALSA shared library `libasound2`
+> (audio) — no `libxdo`, `wl-clipboard`, GTK or appindicator (input, clipboard and the tray are all
+> pure-Rust). The install script checks for it and offers to install it via your package manager
+> (`apt`/`dnf`/`pacman`/`zypper`); with `--yes` it just does it. The `*-static` build links ALSA in,
+> so it needs **nothing at all** — use it (or `--static`) if you'd rather not touch system packages.
+> `libasound2-dev` and `pkg-config` are only needed to *compile from source*, never to run a release.
+> macOS and Windows need nothing extra.
 
 ### Build from source
 
@@ -137,6 +178,8 @@ dit --vad-silence 0.8            # commit faster on shorter pauses
 dit --region eu                  # EU data residency
 dit --list-devices               # list inputs and exit
 dit doctor                       # diagnose mic/keyboard/session permissions
+dit update                       # update to the latest release (no-op if current)
+dit update --check               # only report whether an update is available
 ```
 
 Press **F9** → speak → press **F9** again. While recording, the tray icon becomes a high-contrast **VU meter**: dark red bars mean silence/no input, green bars mean healthy speech level, and yellow/red bars mean loud input. `Ctrl+C` quits. Crank up logs with `RUST_LOG=dit=debug`.
@@ -273,10 +316,14 @@ Versioning is **commit-driven**. [`release-plz`](https://release-plz.dev) reads 
 that bumps the version (`feat` → minor, `fix` → patch, `!`/`BREAKING CHANGE` → major) and updates
 `CHANGELOG.md`. Merging that PR creates the version tag.
 
-The tag triggers the release build on [Blacksmith](https://blacksmith.sh) runners — Linux
-x86_64/aarch64 compile **natively** (no QEMU/cross), macOS ships universal coverage, Windows an
-`.exe`. Every target is built `--locked`, stripped, smoke-tested, and published to a GitHub Release
-with `.sha256` sidecars and a [`git-cliff`](https://git-cliff.org) changelog.
+The tag triggers the release build on [Blacksmith](https://blacksmith.sh) runners. Linux
+`x86_64`/`aarch64` compile **natively** then get their glibc floor lowered to 2.28 by
+[`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) (so one binary spans every modern
+distro); `armv7` cross-compiles the same way. Two extra **fully-static musl** binaries
+(`*-static`) build inside `messense/rust-musl-cross` containers with a statically-linked ALSA, as a
+fallback for ancient or musl hosts. macOS ships universal coverage, Windows an `.exe`. Every target
+is built `--locked`, stripped, smoke-tested, and published to a GitHub Release with `.sha256`
+sidecars and a [`git-cliff`](https://git-cliff.org) changelog.
 
 ```
 commits (feat:/fix:/…) ─► release-plz PR ─► merge ─► tag vX.Y.Z ─► binaries + GitHub Release
