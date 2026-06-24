@@ -29,6 +29,11 @@ dirs = "5"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# `dit update` self-upgrade: a blocking HTTPS client (rustls, no OpenSSL),
+# SHA-256 verification, and atomic replacement of the running executable.
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+sha2 = "0.10"
+self-replace = "1"
 
 [profile.release]
 opt-level = 3
