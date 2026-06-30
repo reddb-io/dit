@@ -108,6 +108,29 @@ pub enum Command {
         #[arg(long)]
         version: Option<String>,
     },
+    /// Manage local speech-to-text models stored in ~/.dit/models/.
+    Models {
+        #[command(subcommand)]
+        action: ModelsAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ModelsAction {
+    /// List known models and whether each is installed.
+    List,
+    /// Download a model from HuggingFace and verify its SHA-256 checksum.
+    Download {
+        /// Model ID (e.g. `whisper-tiny`). Run `dit models list` to see all IDs.
+        id: String,
+    },
+    /// Print the directory where models are stored (~/.dit/models/).
+    Path,
+    /// Delete a downloaded model to reclaim disk space.
+    Rm {
+        /// Model ID to remove.
+        id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
