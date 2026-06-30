@@ -22,7 +22,7 @@ use evdev::{uinput::VirtualDevice, AttributeSet, EventType, KeyCode, KeyEvent};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
 
-use crate::config::FunctionKey;
+use crate::config::{FunctionKey, RecordingMode};
 use crate::inject::InjectMsg;
 use crate::Control;
 
@@ -63,17 +63,29 @@ pub fn evdev_keycode(key: FunctionKey) -> KeyCode {
     }
 }
 
-/// Spawn one reader thread per keyboard; each forwards a press of `target` as a
-/// toggle. Autorepeat (value 2) and release (value 0) are ignored.
+/// Spawn one reader thread per keyboard; each forwards hotkey events to `tx`.
+///
+/// In `Toggle` mode (the default) only key-press events (`value == 1`) are
+/// forwarded as [`Control::Toggle`]. Autorepeat (`value == 2`) and release
+/// (`value == 0`) are ignored, matching the original behaviour.
+///
+/// In `Hold` mode a key-press sends [`Control::KeyDown`] (start recording) and
+/// a key-release sends [`Control::KeyUp`] (stop recording). Autorepeat is still
+/// ignored. The debounce window guards against OS-level duplicate press events;
+/// release events are never debounced so the stop is always delivered.
 ///
 /// The device set is re-scanned forever so USB/Bluetooth keyboards that appear
 /// after `dit` starts are picked up automatically. Dead readers unregister their
 /// path so the monitor can attach again if the kernel reuses the event node.
-pub fn spawn_hotkey(target: KeyCode, tx: UnboundedSender<Control>) -> Result<()> {
+pub fn spawn_hotkey(
+    target: KeyCode,
+    tx: UnboundedSender<Control>,
+    mode: RecordingMode,
+) -> Result<()> {
     let target_code = target.code();
     let active = Arc::new(Mutex::new(HashSet::<PathBuf>::new()));
     let debouncer = Arc::new(HotkeyDebouncer::default());
-    let found = scan_keyboards(target_code, &tx, &active, &debouncer);
+    let found = scan_keyboards(target_code, mode, &tx, &active, &debouncer);
 
     if found == 0 && !Path::new("/dev/input").exists() {
         bail!(
@@ -89,7 +101,7 @@ pub fn spawn_hotkey(target: KeyCode, tx: UnboundedSender<Control>) -> Result<()>
 
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(2));
-        let newly_found = scan_keyboards(target_code, &tx, &active, &debouncer);
+        let newly_found = scan_keyboards(target_code, mode, &tx, &active, &debouncer);
         if newly_found > 0 {
             info!("attached hotkey listener to {newly_found} new keyboard(s)");
         }
@@ -99,6 +111,7 @@ pub fn spawn_hotkey(target: KeyCode, tx: UnboundedSender<Control>) -> Result<()>
 
 fn scan_keyboards(
     target_code: u16,
+    mode: RecordingMode,
     tx: &UnboundedSender<Control>,
     active: &Arc<Mutex<HashSet<PathBuf>>>,
     debouncer: &Arc<HotkeyDebouncer>,
@@ -119,7 +132,7 @@ fn scan_keyboards(
         let active = active.clone();
         let debouncer = debouncer.clone();
         std::thread::spawn(move || {
-            run_keyboard_reader(path, dev, target_code, tx, active, debouncer)
+            run_keyboard_reader(path, dev, target_code, mode, tx, active, debouncer)
         });
     }
     found
@@ -138,6 +151,7 @@ fn run_keyboard_reader(
     path: PathBuf,
     mut dev: evdev::Device,
     target_code: u16,
+    mode: RecordingMode,
     tx: UnboundedSender<Control>,
     active: Arc<Mutex<HashSet<PathBuf>>>,
     debouncer: Arc<HotkeyDebouncer>,
@@ -148,14 +162,36 @@ fn run_keyboard_reader(
         match dev.fetch_events() {
             Ok(events) => {
                 for ev in events {
-                    if ev.event_type() == EventType::KEY
-                        && ev.code() == target_code
-                        && ev.value() == 1
-                    {
-                        if debouncer.should_fire(Instant::now()) {
-                            let _ = tx.send(Control::Toggle);
-                        } else {
-                            debug!("ignored duplicate hotkey event within debounce window");
+                    if ev.event_type() != EventType::KEY || ev.code() != target_code {
+                        continue;
+                    }
+                    match mode {
+                        RecordingMode::Toggle => {
+                            // Only react to key-press; autorepeat (2) and release (0) ignored.
+                            if ev.value() == 1 {
+                                if debouncer.should_fire(Instant::now()) {
+                                    let _ = tx.send(Control::Toggle);
+                                } else {
+                                    debug!("ignored duplicate hotkey event within debounce window");
+                                }
+                            }
+                        }
+                        RecordingMode::Hold => {
+                            if ev.value() == 1 {
+                                // Key pressed — start recording (debounced to guard against
+                                // OS-level duplicate press events).
+                                if debouncer.should_fire(Instant::now()) {
+                                    let _ = tx.send(Control::KeyDown);
+                                } else {
+                                    debug!(
+                                        "hold: ignored duplicate key-down within debounce window"
+                                    );
+                                }
+                            } else if ev.value() == 0 {
+                                // Key released — stop recording immediately (no debounce).
+                                let _ = tx.send(Control::KeyUp);
+                            }
+                            // autorepeat (value == 2) is always ignored
                         }
                     }
                 }
