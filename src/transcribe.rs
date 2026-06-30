@@ -14,7 +14,7 @@ use tokio::time::timeout;
 use tracing::warn;
 
 use crate::audio::{self, CaptureEvent};
-use crate::config::{Config, SAMPLE_RATE};
+use crate::config::{Config, Engine, SAMPLE_RATE};
 use crate::engine::{ScribeEngine, Transcriber};
 use crate::inject::Injector;
 use crate::notify::notify;
@@ -64,16 +64,29 @@ async fn session_inner(
         }
     };
 
-    let engine = ScribeEngine::default();
-    engine
-        .run_stream(
-            &cfg,
-            injector,
-            samples_rx,
-            audio_stop,
-            native_rate,
-            stop,
-            state,
-        )
-        .await
+    match cfg.engine {
+        #[cfg(feature = "local")]
+        Engine::Local => {
+            use crate::engine::LocalEngine;
+            use crate::models::resolve_local_model;
+            let model_path = resolve_local_model(&cfg.model).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "local model {:?} not found — run `dit models download {}` first",
+                    cfg.model, cfg.model
+                )
+            })?;
+            LocalEngine::new(model_path)
+                .run_stream(&cfg, injector, samples_rx, audio_stop, native_rate, stop, state)
+                .await
+        }
+        #[cfg(not(feature = "local"))]
+        Engine::Local => {
+            anyhow::bail!("dit was built without --features local; rebuild with `cargo build --features local`")
+        }
+        Engine::Cloud => {
+            ScribeEngine::default()
+                .run_stream(&cfg, injector, samples_rx, audio_stop, native_rate, stop, state)
+                .await
+        }
+    }
 }
