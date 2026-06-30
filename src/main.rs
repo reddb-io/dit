@@ -30,7 +30,7 @@ mod transcribe;
 use std::sync::Arc;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -65,7 +65,12 @@ fn main() -> Result<()> {
         )
         .init();
 
-    let cli = Cli::parse();
+    // Parse via `ArgMatches` (not `Cli::parse`) so config resolution can tell an
+    // explicitly-passed flag from one left at its default — flags must win over
+    // the persistent config file. `get_matches` still handles --help/--version
+    // and usage errors by exiting, exactly like `parse`.
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches)?;
     if let Some(Command::Service { action }) = &cli.command {
         return service::run(action);
     }
@@ -76,7 +81,7 @@ fn main() -> Result<()> {
         return audio::list_devices();
     }
 
-    let cfg = Config::resolve(&cli)?;
+    let cfg = Config::resolve(&cli, &matches)?;
     let injector = Injector::spawn(cfg.paste_shift)?;
 
     // Background Tokio runtime for audio + the WebSocket. Kept alive for the
