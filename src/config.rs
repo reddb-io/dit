@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// A platform-neutral toggle key (F1..F12). Converted to the right per-OS
 /// representation where it's used (global-hotkey on macOS/Windows, evdev on Linux).
@@ -25,6 +25,16 @@ pub enum FunctionKey {
     F10,
     F11,
     F12,
+}
+
+/// How the hotkey drives a dictation session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum RecordMode {
+    /// Press to start, press again to stop (the historical behaviour).
+    #[default]
+    Toggle,
+    /// Press-and-hold to record; releasing the hotkey stops the session.
+    Hold,
 }
 
 /// Cross-platform voice dictation via ElevenLabs Scribe v2 Realtime.
@@ -46,6 +56,10 @@ pub struct Cli {
     /// Toggle hotkey. Supports F1..F12 (e.g. `F9`).
     #[arg(long, default_value = "F9")]
     pub hotkey: String,
+
+    /// Recording mode: `toggle` (press to start/stop) or `hold` (hold to record).
+    #[arg(long, value_enum, default_value_t = RecordMode::Toggle)]
+    pub mode: RecordMode,
 
     /// Input device name substring to prefer (otherwise the system default).
     #[arg(long)]
@@ -129,6 +143,7 @@ pub struct Config {
     pub language: String,
     pub model: String,
     pub hotkey: FunctionKey,
+    pub mode: RecordMode,
     pub device: Option<String>,
     pub no_filler: bool,
     pub keyterms: Vec<String>,
@@ -173,6 +188,7 @@ impl Config {
             language: cli.language.clone(),
             model: cli.model.clone(),
             hotkey,
+            mode: cli.mode,
             device: cli.device.clone(),
             no_filler: cli.no_filler,
             keyterms: cli.keyterms.clone(),
@@ -275,4 +291,21 @@ fn parse_hotkey(name: &str) -> Result<FunctionKey> {
         other => bail!("only F1..F12 are supported, got {other}"),
     };
     Ok(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_defaults_to_toggle_and_parses_hold() {
+        let cli = Cli::parse_from(["dit"]);
+        assert_eq!(cli.mode, RecordMode::Toggle);
+
+        let cli = Cli::parse_from(["dit", "--mode", "hold"]);
+        assert_eq!(cli.mode, RecordMode::Hold);
+
+        let cli = Cli::parse_from(["dit", "--mode", "toggle"]);
+        assert_eq!(cli.mode, RecordMode::Toggle);
+    }
 }
