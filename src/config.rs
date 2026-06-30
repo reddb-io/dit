@@ -37,7 +37,8 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Language code passed to Scribe (e.g. `pt`, `en`, `es`).
+    /// Language code passed to Scribe (e.g. `pt`, `en`, `es`), or `auto` to
+    /// let the engine detect the spoken language automatically.
     #[arg(long, default_value = "pt")]
     pub language: String,
 
@@ -160,6 +161,8 @@ const DEFAULT_MODEL: &str = "scribe_v2_realtime";
 const DEFAULT_HOTKEY: &str = "F9";
 const DEFAULT_REGION: &str = "global";
 const DEFAULT_VAD_SILENCE: f64 = 1.5;
+pub const DEFAULT_SESSION_MAX_AGE_DAYS: u64 = 30;
+pub const DEFAULT_SESSION_MAX_COUNT: usize = 100;
 
 /// One layer of overrides. Every field is optional: a `None` means "this layer
 /// does not touch the setting". The same shape is used for the on-disk
@@ -178,6 +181,8 @@ pub struct SettingsLayer {
     pub region: Option<String>,
     pub no_preview: Option<bool>,
     pub paste_shift: Option<bool>,
+    pub session_max_age_days: Option<u64>,
+    pub session_max_count: Option<usize>,
 }
 
 /// Settings after merging every layer over the built-in defaults. Distinct from
@@ -195,6 +200,8 @@ struct ResolvedSettings {
     region: String,
     no_preview: bool,
     paste_shift: bool,
+    session_max_age_days: u64,
+    session_max_count: usize,
 }
 
 /// Merge the three override layers over the defaults. Later arguments win:
@@ -225,6 +232,18 @@ fn merge(file: SettingsLayer, env: SettingsLayer, cli: SettingsLayer) -> Resolve
         region: pick(DEFAULT_REGION.into(), file.region, env.region, cli.region),
         no_preview: pick(false, file.no_preview, env.no_preview, cli.no_preview),
         paste_shift: pick(false, file.paste_shift, env.paste_shift, cli.paste_shift),
+        session_max_age_days: pick(
+            DEFAULT_SESSION_MAX_AGE_DAYS,
+            file.session_max_age_days,
+            env.session_max_age_days,
+            cli.session_max_age_days,
+        ),
+        session_max_count: pick(
+            DEFAULT_SESSION_MAX_COUNT,
+            file.session_max_count,
+            env.session_max_count,
+            cli.session_max_count,
+        ),
     }
 }
 
@@ -272,6 +291,8 @@ fn env_layer(get: impl Fn(&str) -> Option<String>) -> SettingsLayer {
         region: s("DIT_REGION"),
         no_preview: flag("DIT_NO_PREVIEW"),
         paste_shift: flag("DIT_PASTE_SHIFT"),
+        session_max_age_days: s("DIT_SESSION_MAX_AGE_DAYS").and_then(|v| v.parse().ok()),
+        session_max_count: s("DIT_SESSION_MAX_COUNT").and_then(|v| v.parse().ok()),
     }
 }
 
@@ -291,6 +312,8 @@ fn cli_layer(cli: &Cli, matches: &ArgMatches) -> SettingsLayer {
         region: on_cli("region").then(|| cli.region.clone()),
         no_preview: on_cli("no_preview").then_some(cli.no_preview),
         paste_shift: on_cli("paste_shift").then_some(cli.paste_shift),
+        session_max_age_days: None,
+        session_max_count: None,
     }
 }
 
@@ -308,6 +331,8 @@ pub struct Config {
     pub region: String,
     pub no_preview: bool,
     pub paste_shift: bool,
+    pub session_max_age_days: u64,
+    pub session_max_count: usize,
 }
 
 /// Target sample rate sent to the API (Scribe expects 16 kHz mono s16le).
@@ -360,6 +385,8 @@ impl Config {
             region: settings.region,
             no_preview: settings.no_preview,
             paste_shift: settings.paste_shift,
+            session_max_age_days: settings.session_max_age_days,
+            session_max_count: settings.session_max_count,
         })
     }
 
@@ -382,14 +409,18 @@ impl Config {
         let mut url = format!(
             "wss://{}/v1/speech-to-text/realtime\
              ?model_id={}&encoding=pcm_{}&sample_rate={}\
-             &commit_strategy=vad&vad_silence_threshold_secs={}&language_code={}",
+             &commit_strategy=vad&vad_silence_threshold_secs={}",
             self.host(),
             self.model,
             SAMPLE_RATE,
             SAMPLE_RATE,
             self.vad_silence,
-            self.language,
         );
+        // "auto" means omit the parameter so Scribe detects the language itself.
+        if self.language != "auto" {
+            url.push_str("&language_code=");
+            url.push_str(&self.language);
+        }
         if self.no_filler {
             url.push_str("&no_verbatim=true");
         }
@@ -643,5 +674,58 @@ mod tests {
         let cli = Cli::from_arg_matches(&matches).expect("parses");
         let resolved = merge(file, empty_env(), cli_layer(&cli, &matches));
         assert_eq!(resolved.language, "es");
+    }
+
+    fn dummy_config(language: &str) -> Config {
+        Config {
+            api_key: "key".into(),
+            language: language.into(),
+            model: "scribe_v2_realtime".into(),
+            hotkey: FunctionKey::F9,
+            device: None,
+            no_filler: false,
+            keyterms: vec![],
+            vad_silence: 1.5,
+            region: "global".into(),
+            no_preview: false,
+            paste_shift: false,
+            session_max_age_days: DEFAULT_SESSION_MAX_AGE_DAYS,
+            session_max_count: DEFAULT_SESSION_MAX_COUNT,
+        }
+    }
+
+    #[test]
+    fn ws_url_explicit_language_includes_language_code_param() {
+        let url = dummy_config("pt").ws_url();
+        assert!(url.contains("language_code=pt"), "url: {url}");
+
+        let url = dummy_config("en").ws_url();
+        assert!(url.contains("language_code=en"), "url: {url}");
+    }
+
+    #[test]
+    fn ws_url_auto_language_omits_language_code_param() {
+        let url = dummy_config("auto").ws_url();
+        assert!(!url.contains("language_code"), "url should have no language_code: {url}");
+    }
+
+    #[test]
+    fn auto_propagates_through_all_config_layers() {
+        // via config file layer
+        let file = SettingsLayer { language: Some("auto".into()), ..Default::default() };
+        let resolved = merge(file, empty_env(), SettingsLayer::default());
+        assert_eq!(resolved.language, "auto");
+
+        // via env layer
+        let env = env_layer(|k| (k == "DIT_LANGUAGE").then(|| "auto".into()));
+        let resolved = merge(SettingsLayer::default(), env, SettingsLayer::default());
+        assert_eq!(resolved.language, "auto");
+
+        // via CLI flag
+        let matches = Cli::command().get_matches_from(["dit", "--language", "auto"]);
+        let cli = Cli::from_arg_matches(&matches).expect("parses");
+        let cli_overrides = cli_layer(&cli, &matches);
+        let resolved = merge(SettingsLayer::default(), empty_env(), cli_overrides);
+        assert_eq!(resolved.language, "auto");
     }
 }
