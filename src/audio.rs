@@ -34,6 +34,10 @@ pub fn recommended_audio_channel_capacity() -> usize {
 /// Rank capture devices. Lower is better. This avoids getting stuck on ALSA
 /// pseudo-devices that CPAL may enumerate as inputs but that commonly fail or
 /// are playback-oriented aliases (`front`, `surround*`, `dmix`, HDMI, etc.).
+///
+/// macOS Continuity / iPhone microphones are explicitly ranked as real capture
+/// hardware (rank 2) so they are never penalised by the "system default" check
+/// that was designed for Linux's virtual `default` ALSA alias.
 fn device_rank(
     name: &str,
     prefer: Option<&str>,
@@ -53,12 +57,14 @@ fn device_rank(
     let plughw = lower.starts_with("plughw:");
     let hw = lower.starts_with("hw:");
     let sysdefault = lower.starts_with("sysdefault:");
+    // macOS Continuity Camera / iPhone microphones are real capture devices.
+    let continuity = lower.contains("iphone") || lower.contains("continuity");
 
     let rank = if preferred {
         0
     } else if pipewire {
         1
-    } else if plughw {
+    } else if continuity || plughw {
         2
     } else if hw {
         3
@@ -388,6 +394,30 @@ mod tests {
         let preferred = device_rank("USB Audio Device", Some("usb audio"), Some("default"), 5);
         let pipewire = device_rank("pipewire", Some("usb audio"), Some("default"), 0);
         assert!(preferred < pipewire);
+    }
+
+    #[test]
+    fn continuity_iphone_mic_ranks_as_real_capture_device() {
+        // Continuity mics must rank above the generic catch-all and the "default" alias.
+        let iphone = device_rank("iPhone Microphone", None, None, 1);
+        let continuity = device_rank("Continuity Camera Microphone", None, None, 2);
+        let catch_all = device_rank("MacBook Pro Microphone", None, None, 3);
+        let default_alias = device_rank("default", None, None, 4);
+
+        assert!(iphone < catch_all, "iPhone mic should rank above catch-all");
+        assert!(iphone < default_alias, "iPhone mic should rank above default alias");
+        assert!(
+            continuity < catch_all,
+            "Continuity mic should rank above catch-all"
+        );
+
+        // When the iPhone IS the system default input, it must still rank well.
+        let iphone_as_default =
+            device_rank("iPhone Microphone", None, Some("iPhone Microphone"), 1);
+        assert!(
+            iphone_as_default < catch_all,
+            "iPhone mic ranked as system default must not be penalised"
+        );
     }
 
     #[test]
