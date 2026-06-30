@@ -19,6 +19,7 @@
 mod audio;
 mod config;
 mod doctor;
+mod engine;
 mod inject;
 #[cfg(target_os = "linux")]
 mod linux_input;
