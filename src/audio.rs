@@ -93,6 +93,33 @@ pub fn list_devices() -> Result<()> {
     Ok(())
 }
 
+/// Input device names for the tray "Device" submenu, ranked best-first so the
+/// most likely real microphone shows up at the top. Best-effort: returns an
+/// empty list when enumeration fails rather than erroring.
+pub fn device_names() -> Vec<String> {
+    let host = cpal::default_host();
+    let default_name = host.default_input_device().and_then(|d| d.name().ok());
+    let Ok(devices) = host.input_devices() else {
+        return Vec::new();
+    };
+    let mut ranked: Vec<((u8, usize), String)> = devices
+        .enumerate()
+        .map(|(idx, device)| {
+            let name = device.name().unwrap_or_else(|_| "<unknown>".into());
+            let rank = device_rank(&name, None, default_name.as_deref(), idx);
+            (rank, name)
+        })
+        .collect();
+    ranked.sort_by_key(|(rank, _)| *rank);
+    let mut names: Vec<String> = Vec::with_capacity(ranked.len());
+    for (_, name) in ranked {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 fn candidate_devices(prefer: &Option<String>) -> Result<Vec<(String, cpal::Device)>> {
     let host = cpal::default_host();
     let default_name = host.default_input_device().and_then(|d| d.name().ok());
