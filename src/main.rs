@@ -42,8 +42,14 @@ use inject::Injector;
 use transcribe::run_session;
 
 /// Control messages from the UI to the async session manager.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Control {
+    /// Flip the session: start if idle, stop if recording (toggle mode).
     Toggle,
+    /// Start a session if one isn't already running (hold mode, key-down).
+    Start,
+    /// Stop the running session, if any (hold mode, key-up).
+    Stop,
 }
 
 /// What the tray icon should show.
@@ -109,11 +115,29 @@ async fn manager(
     mut rx: UnboundedReceiver<Control>,
     state_tx: UnboundedSender<IconState>,
 ) {
-    let mut current: Option<(Arc<Notify>, JoinHandle<Result<()>>)> = None;
+    type Session = (Arc<Notify>, JoinHandle<Result<()>>);
+    let mut current: Option<Session> = None;
 
-    while let Some(Control::Toggle) = rx.recv().await {
-        match current.take() {
-            Some((stop, handle)) if !handle.is_finished() => {
+    let is_running = |current: &Option<Session>| {
+        current
+            .as_ref()
+            .is_some_and(|(_, handle)| !handle.is_finished())
+    };
+
+    let start = |current: &mut Option<Session>| {
+        let stop = Arc::new(Notify::new());
+        let handle = tokio::spawn(run_session(
+            cfg.clone(),
+            injector.clone(),
+            stop.clone(),
+            state_tx.clone(),
+        ));
+        *current = Some((stop, handle));
+    };
+
+    let stop = |current: &mut Option<Session>| {
+        if let Some((stop, handle)) = current.take() {
+            if !handle.is_finished() {
                 stop.notify_one();
                 tokio::spawn(async move {
                     if let Ok(Err(e)) = handle.await {
@@ -121,16 +145,26 @@ async fn manager(
                     }
                 });
             }
-            _ => {
-                let stop = Arc::new(Notify::new());
-                let handle = tokio::spawn(run_session(
-                    cfg.clone(),
-                    injector.clone(),
-                    stop.clone(),
-                    state_tx.clone(),
-                ));
-                current = Some((stop, handle));
+        }
+    };
+
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            Control::Toggle => {
+                if is_running(&current) {
+                    stop(&mut current);
+                } else {
+                    start(&mut current);
+                }
             }
+            // Hold mode: idempotent so duplicate key-down/up events (e.g. from
+            // multiple keyboard device nodes) can't double-start or double-stop.
+            Control::Start => {
+                if !is_running(&current) {
+                    start(&mut current);
+                }
+            }
+            Control::Stop => stop(&mut current),
         }
     }
 }
@@ -313,7 +347,8 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
     info!("ready — press the hotkey (or use the tray) to start/stop dictation");
 
     // Hotkey via evdev (/dev/input) — works on X11 and Wayland alike.
-    if let Err(e) = linux_input::spawn_hotkey(linux_input::evdev_keycode(cfg.hotkey), tx) {
+    if let Err(e) = linux_input::spawn_hotkey(linux_input::evdev_keycode(cfg.hotkey), cfg.mode, tx)
+    {
         error!("{e:#}");
         notify::notify("dit — hotkey unavailable", &format!("{e}"));
     }
@@ -400,14 +435,35 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
 
     let hotkey_rx = GlobalHotKeyEvent::receiver();
     let menu_rx = MenuEvent::receiver();
+    let mode = cfg.mode;
+    // Hold mode: track the pressed state so duplicate Pressed/Released events
+    // can't double-start or double-stop the session.
+    let mut held = false;
 
     event_loop.run(move |event, _, control_flow| {
         let _ = &hotkey_manager;
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100));
 
         if let Ok(ev) = hotkey_rx.try_recv() {
-            if ev.id == hotkey_id && ev.state == HotKeyState::Pressed {
-                let _ = tx.send(Control::Toggle);
+            if ev.id == hotkey_id {
+                match mode {
+                    config::RecordMode::Toggle => {
+                        if ev.state == HotKeyState::Pressed {
+                            let _ = tx.send(Control::Toggle);
+                        }
+                    }
+                    config::RecordMode::Hold => match ev.state {
+                        HotKeyState::Pressed if !held => {
+                            held = true;
+                            let _ = tx.send(Control::Start);
+                        }
+                        HotKeyState::Released if held => {
+                            held = false;
+                            let _ = tx.send(Control::Stop);
+                        }
+                        _ => {}
+                    },
+                }
             }
         }
         if let Ok(ev) = menu_rx.try_recv() {
