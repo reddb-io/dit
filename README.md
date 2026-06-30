@@ -195,6 +195,8 @@ Press **F9** → speak → press **F9** again. While recording, the tray icon be
 | `--vad-silence <SECS>` | `1.5` | Silence before a segment commits — lower = snappier |
 | `--region` | `global` | API region: `global`, `us`, `eu`, `in` |
 | `--no-preview` | off | Disable the live terminal preview |
+| `--paste-shift` | off | Linux: paste with `Ctrl+Shift+V` (for terminals) |
+| `--type` | off | Linux: type the transcript via uinput instead of pasting (clipboard fallback for accents/emoji) |
 | `--env-file` | `~/.dit.env` | Path to the key file |
 | `--list-devices` | — | Print input devices and exit |
 
@@ -300,6 +302,16 @@ also appended to the session log, so a failed paste can still be recovered.
 > ```
 >
 > In a terminal, paste is `Ctrl+Shift+V` — pass `--paste-shift` so dit uses that chord.
+>
+> **Paste interpreted as an image (GNOME/Wayland):** terminal TUIs (Claude Code, Codex, opencode)
+> inspect the clipboard's MIME targets on paste, and on GNOME/Wayland Mutter's X11↔Wayland clipboard
+> bridge can intermittently leave a stale `image/*` target live (after a recent screenshot copy), so
+> the transcript gets attached as an image. dit mitigates this by re-verifying and re-setting the
+> clipboard with a longer settle before pasting. To bypass the clipboard entirely, pass `--type`:
+> dit then *types* the transcript through the virtual keyboard, falling back to the clipboard only for
+> characters the layout can't type (accents like `ç`/`ã`, symbols, emoji). Fully-typeable text never
+> touches the clipboard — so it can't be mis-read as an image and your clipboard isn't clobbered.
+> (`--type` is Linux-only; macOS/Windows already type every character via `enigo`.)
 
 > [!NOTE]
 > **macOS** — grant **Accessibility** permission (System Settings → Privacy & Security →
