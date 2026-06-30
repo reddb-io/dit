@@ -27,6 +27,8 @@ mod models;
 mod notify;
 mod output;
 mod service;
+#[cfg(feature = "gui")]
+mod settings;
 mod transcribe;
 mod update;
 
@@ -92,6 +94,15 @@ fn main() -> Result<()> {
     }
     if let Some(Command::Models { action }) = &cli.command {
         return models::run(action);
+    }
+    if let Some(Command::Settings) = &cli.command {
+        #[cfg(feature = "gui")]
+        return settings::run();
+        #[cfg(not(feature = "gui"))]
+        anyhow::bail!(
+            "the `gui` feature is required for `dit settings` — \
+             rebuild with: cargo build --features gui"
+        );
     }
     if cli.list_devices {
         return audio::list_devices();
@@ -281,6 +292,16 @@ impl ksni::Tray for DitTray {
             .into(),
             MenuItem::Separator,
             StandardItem {
+                label: "Settings…".into(),
+                activate: Box::new(|_: &mut DitTray| {
+                    if let Ok(exe) = std::env::current_exe() {
+                        std::process::Command::new(exe).arg("settings").spawn().ok();
+                    }
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
                 label: "Quit dit".into(),
                 activate: Box::new(|_| std::process::exit(0)),
                 ..Default::default()
@@ -391,11 +412,14 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
 
     let menu = Menu::new();
     let toggle_item = MenuItem::new("Start / stop dictation", true, None);
+    let settings_item = MenuItem::new("Settings…", true, None);
     let quit_item = MenuItem::new("Quit dit", true, None);
     menu.append(&toggle_item).ok();
     menu.append(&PredefinedMenuItem::separator()).ok();
+    menu.append(&settings_item).ok();
     menu.append(&quit_item).ok();
     let toggle_id = toggle_item.id().clone();
+    let settings_id = settings_item.id().clone();
     let quit_id = quit_item.id().clone();
 
     let tray = TrayIconBuilder::new()
@@ -421,6 +445,10 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
         if let Ok(ev) = menu_rx.try_recv() {
             if ev.id == toggle_id {
                 let _ = tx.send(Control::Toggle);
+            } else if ev.id == settings_id {
+                if let Ok(exe) = std::env::current_exe() {
+                    std::process::Command::new(exe).arg("settings").spawn().ok();
+                }
             } else if ev.id == quit_id {
                 *control_flow = ControlFlow::Exit;
             }
