@@ -61,9 +61,11 @@ impl Transcriber for ScribeEngine {
 
         // --- receiver: paste committed segments ---
         let preview_enabled = !cfg.no_preview;
+        let session_max_age_days = cfg.session_max_age_days;
+        let session_max_count = cfg.session_max_count;
         let recv = tokio::spawn(async move {
             let mut preview = Preview::new(preview_enabled);
-            let mut log = SessionLog::open();
+            let mut log = SessionLog::open(session_max_age_days, session_max_count);
             let mut last_committed = String::new();
             // The latest previewed segment that has NOT yet been committed. A
             // non-empty value when the loop exits is a tail we never got a commit
