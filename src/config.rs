@@ -153,6 +153,8 @@ pub enum Command {
         #[command(subcommand)]
         action: ModelsAction,
     },
+    /// Open the settings GUI (requires a build with the `gui` cargo feature).
+    Settings,
 }
 
 #[derive(Subcommand, Debug)]
@@ -195,10 +197,10 @@ pub enum ServiceAction {
 // ([`merge`], [`env_layer`]) so it can be unit-tested without touching the real
 // filesystem or process environment.
 
-const DEFAULT_LANGUAGE: &str = "pt";
-const DEFAULT_MODEL: &str = "scribe_v2_realtime";
-const DEFAULT_HOTKEY: &str = "F9";
-const DEFAULT_REGION: &str = "global";
+pub(crate) const DEFAULT_LANGUAGE: &str = "pt";
+pub(crate) const DEFAULT_MODEL: &str = "scribe_v2_realtime";
+pub(crate) const DEFAULT_HOTKEY: &str = "F9";
+pub(crate) const DEFAULT_REGION: &str = "global";
 const DEFAULT_VAD_SILENCE: f64 = 1.5;
 pub const DEFAULT_SESSION_MAX_AGE_DAYS: u64 = 30;
 pub const DEFAULT_SESSION_MAX_COUNT: usize = 100;
@@ -287,7 +289,7 @@ fn merge(file: SettingsLayer, env: SettingsLayer, cli: SettingsLayer) -> Resolve
 }
 
 /// Path to the persistent config store, `~/.dit/config.toml`.
-fn config_path() -> Option<PathBuf> {
+pub(crate) fn config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".dit").join("config.toml"))
 }
 

@@ -34,6 +34,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev pkg-config
 
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libegl1-mesa-dev
+
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy, rustfmt
@@ -52,6 +57,9 @@ jobs:
 
       - name: Build
         run: cargo build --release
+
+      - name: Build (gui feature)
+        run: cargo build --release --features gui
 
       - name: Test
         run: cargo test --release
