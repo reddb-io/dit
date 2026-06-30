@@ -128,7 +128,11 @@ fn prune_sessions(dir: &Path, max_age_days: u64, max_count: usize) {
             .filter_map(|e| {
                 let name = e.file_name();
                 let s = name.to_string_lossy();
-                let ms = s.strip_prefix("session-")?.strip_suffix(".txt")?.parse::<u128>().ok()?;
+                let ms = s
+                    .strip_prefix("session-")?
+                    .strip_suffix(".txt")?
+                    .parse::<u128>()
+                    .ok()?;
                 Some((ms, e.path()))
             })
             .collect(),

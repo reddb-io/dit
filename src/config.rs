@@ -706,13 +706,19 @@ mod tests {
     #[test]
     fn ws_url_auto_language_omits_language_code_param() {
         let url = dummy_config("auto").ws_url();
-        assert!(!url.contains("language_code"), "url should have no language_code: {url}");
+        assert!(
+            !url.contains("language_code"),
+            "url should have no language_code: {url}"
+        );
     }
 
     #[test]
     fn auto_propagates_through_all_config_layers() {
         // via config file layer
-        let file = SettingsLayer { language: Some("auto".into()), ..Default::default() };
+        let file = SettingsLayer {
+            language: Some("auto".into()),
+            ..Default::default()
+        };
         let resolved = merge(file, empty_env(), SettingsLayer::default());
         assert_eq!(resolved.language, "auto");
 
