@@ -27,6 +27,7 @@ mod models;
 mod notify;
 mod output;
 mod service;
+mod settings;
 mod transcribe;
 mod update;
 
@@ -92,6 +93,10 @@ fn main() -> Result<()> {
     }
     if let Some(Command::Models { action }) = &cli.command {
         return models::run(action);
+    }
+    #[cfg(feature = "gui")]
+    if let Some(Command::Settings) = &cli.command {
+        return settings::run();
     }
     if cli.list_devices {
         return audio::list_devices();
@@ -270,7 +275,7 @@ impl ksni::Tray for DitTray {
     }
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
-        vec![
+        let mut items: Vec<ksni::MenuItem<Self>> = vec![
             StandardItem {
                 label: "Start / stop dictation".into(),
                 activate: Box::new(|t: &mut DitTray| {
@@ -280,13 +285,32 @@ impl ksni::Tray for DitTray {
             }
             .into(),
             MenuItem::Separator,
+        ];
+        #[cfg(feature = "gui")]
+        {
+            items.push(
+                StandardItem {
+                    label: "Settings\u{2026}".into(),
+                    activate: Box::new(|_: &mut DitTray| {
+                        if let Ok(exe) = std::env::current_exe() {
+                            let _ = std::process::Command::new(exe).arg("settings").spawn();
+                        }
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+            items.push(MenuItem::Separator);
+        }
+        items.push(
             StandardItem {
                 label: "Quit dit".into(),
                 activate: Box::new(|_| std::process::exit(0)),
                 ..Default::default()
             }
             .into(),
-        ]
+        );
+        items
     }
 }
 
@@ -389,14 +413,25 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
         Icon::from_rgba(rgba, size, size).expect("valid RGBA icon")
     };
 
-    let menu = Menu::new();
     let toggle_item = MenuItem::new("Start / stop dictation", true, None);
     let quit_item = MenuItem::new("Quit dit", true, None);
+    #[cfg(feature = "gui")]
+    let settings_item = MenuItem::new("Settings\u{2026}", true, None);
+
+    let menu = Menu::new();
     menu.append(&toggle_item).ok();
     menu.append(&PredefinedMenuItem::separator()).ok();
+    #[cfg(feature = "gui")]
+    {
+        menu.append(&settings_item).ok();
+        menu.append(&PredefinedMenuItem::separator()).ok();
+    }
     menu.append(&quit_item).ok();
+
     let toggle_id = toggle_item.id().clone();
     let quit_id = quit_item.id().clone();
+    #[cfg(feature = "gui")]
+    let settings_id = settings_item.id().clone();
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -423,6 +458,12 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
                 let _ = tx.send(Control::Toggle);
             } else if ev.id == quit_id {
                 *control_flow = ControlFlow::Exit;
+            }
+            #[cfg(feature = "gui")]
+            if ev.id == settings_id {
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = std::process::Command::new(exe).arg("settings").spawn();
+                }
             }
         }
         if let Event::UserEvent(UserEvent::SetState(state)) = event {
