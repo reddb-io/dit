@@ -29,6 +29,15 @@ pub enum FunctionKey {
     F12,
 }
 
+/// Which transcription backend to use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Engine {
+    /// ElevenLabs Scribe v2 Realtime — streams audio over a WebSocket (needs API key).
+    Cloud,
+    /// Offline Whisper via candle — records then transcribes locally (no network, no API key).
+    Local,
+}
+
 /// Cross-platform voice dictation via ElevenLabs Scribe v2 Realtime.
 #[derive(Parser, Debug)]
 #[command(name = "dit", version, about)]
@@ -86,6 +95,11 @@ pub struct Cli {
     /// List input audio devices and exit.
     #[arg(long)]
     pub list_devices: bool,
+
+    /// Transcription engine: `cloud` (ElevenLabs Scribe, needs API key) or
+    /// `local` (offline Whisper via candle, needs a model from `dit models`).
+    #[arg(long, default_value = "cloud")]
+    pub engine: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -158,6 +172,7 @@ pub enum ServiceAction {
 
 const DEFAULT_LANGUAGE: &str = "pt";
 const DEFAULT_MODEL: &str = "scribe_v2_realtime";
+pub const DEFAULT_LOCAL_MODEL: &str = "whisper-tiny-local";
 const DEFAULT_HOTKEY: &str = "F9";
 const DEFAULT_REGION: &str = "global";
 const DEFAULT_VAD_SILENCE: f64 = 1.5;
@@ -183,6 +198,7 @@ pub struct SettingsLayer {
     pub paste_shift: Option<bool>,
     pub session_max_age_days: Option<u64>,
     pub session_max_count: Option<usize>,
+    pub engine: Option<String>,
 }
 
 /// Settings after merging every layer over the built-in defaults. Distinct from
@@ -202,6 +218,7 @@ struct ResolvedSettings {
     paste_shift: bool,
     session_max_age_days: u64,
     session_max_count: usize,
+    engine: String,
 }
 
 /// Merge the three override layers over the defaults. Later arguments win:
@@ -244,6 +261,7 @@ fn merge(file: SettingsLayer, env: SettingsLayer, cli: SettingsLayer) -> Resolve
             env.session_max_count,
             cli.session_max_count,
         ),
+        engine: pick("cloud".into(), file.engine, env.engine, cli.engine),
     }
 }
 
@@ -293,6 +311,7 @@ fn env_layer(get: impl Fn(&str) -> Option<String>) -> SettingsLayer {
         paste_shift: flag("DIT_PASTE_SHIFT"),
         session_max_age_days: s("DIT_SESSION_MAX_AGE_DAYS").and_then(|v| v.parse().ok()),
         session_max_count: s("DIT_SESSION_MAX_COUNT").and_then(|v| v.parse().ok()),
+        engine: s("DIT_ENGINE"),
     }
 }
 
@@ -314,6 +333,7 @@ fn cli_layer(cli: &Cli, matches: &ArgMatches) -> SettingsLayer {
         paste_shift: on_cli("paste_shift").then_some(cli.paste_shift),
         session_max_age_days: None,
         session_max_count: None,
+        engine: on_cli("engine").then(|| cli.engine.clone()),
     }
 }
 
@@ -333,6 +353,7 @@ pub struct Config {
     pub paste_shift: bool,
     pub session_max_age_days: u64,
     pub session_max_count: usize,
+    pub engine: Engine,
 }
 
 /// Target sample rate sent to the API (Scribe expects 16 kHz mono s16le).
@@ -352,16 +373,6 @@ impl Config {
             load_env_file(path);
         }
 
-        let api_key = std::env::var("ELEVENLABS_API_KEY").unwrap_or_default();
-        if api_key.is_empty() {
-            bail!(
-                "ELEVENLABS_API_KEY is not set. Put it in {} or export it in the environment.",
-                env_path
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "~/.dit.env".into())
-            );
-        }
-
         // defaults < config.toml < environment < CLI flags
         let file = config_path()
             .map(|p| load_file_config(&p))
@@ -370,13 +381,34 @@ impl Config {
         let cli_overrides = cli_layer(cli, matches);
         let settings = merge(file, env, cli_overrides);
 
+        let engine = parse_engine(&settings.engine)
+            .with_context(|| format!("unsupported engine: {}", settings.engine))?;
+
+        let api_key = std::env::var("ELEVENLABS_API_KEY").unwrap_or_default();
+        if api_key.is_empty() && engine == Engine::Cloud {
+            bail!(
+                "ELEVENLABS_API_KEY is not set. Put it in {} or export it in the environment.",
+                env_path
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "~/.dit.env".into())
+            );
+        }
+
         let hotkey = parse_hotkey(&settings.hotkey)
             .with_context(|| format!("unsupported hotkey: {}", settings.hotkey))?;
+
+        // When using the local engine and the user didn't explicitly set a model,
+        // default to the local model instead of the cloud model.
+        let model = if engine == Engine::Local && settings.model == DEFAULT_MODEL {
+            DEFAULT_LOCAL_MODEL.to_string()
+        } else {
+            settings.model
+        };
 
         Ok(Self {
             api_key,
             language: settings.language,
-            model: settings.model,
+            model,
             hotkey,
             device: settings.device,
             no_filler: settings.no_filler,
@@ -387,6 +419,7 @@ impl Config {
             paste_shift: settings.paste_shift,
             session_max_age_days: settings.session_max_age_days,
             session_max_count: settings.session_max_count,
+            engine,
         })
     }
 
@@ -464,6 +497,15 @@ fn load_env_file(path: &PathBuf) {
                 std::env::set_var(k, v);
             }
         }
+    }
+}
+
+/// Parse the engine name into an [`Engine`].
+fn parse_engine(name: &str) -> Result<Engine> {
+    match name.to_ascii_lowercase().as_str() {
+        "cloud" => Ok(Engine::Cloud),
+        "local" => Ok(Engine::Local),
+        other => bail!("engine must be `cloud` or `local`, got {other}"),
     }
 }
 
@@ -691,6 +733,7 @@ mod tests {
             paste_shift: false,
             session_max_age_days: DEFAULT_SESSION_MAX_AGE_DAYS,
             session_max_count: DEFAULT_SESSION_MAX_COUNT,
+            engine: Engine::Cloud,
         }
     }
 
