@@ -22,7 +22,7 @@ use evdev::{uinput::VirtualDevice, AttributeSet, EventType, KeyCode, KeyEvent};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
 
-use crate::config::FunctionKey;
+use crate::config::{Hotkey, Key, Modifier};
 use crate::inject::InjectMsg;
 use crate::Control;
 
@@ -44,10 +44,47 @@ impl HotkeyDebouncer {
     }
 }
 
-/// Map our neutral hotkey to an evdev key code.
-pub fn evdev_keycode(key: FunctionKey) -> KeyCode {
-    use FunctionKey::*;
-    match key {
+/// A hotkey resolved to evdev key codes: the trigger code that fires the toggle,
+/// plus the modifier keys (each accepting its left or right side) that must be held
+/// at the same time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvdevBinding {
+    /// The trigger key's evdev code.
+    pub trigger: u16,
+    /// One entry per required modifier; the modifier is satisfied if *either* of
+    /// its two codes (left/right) is currently held.
+    pub modifiers: Vec<[u16; 2]>,
+}
+
+/// Map our neutral hotkey to evdev key codes. Returns a clear error for keys evdev
+/// can't capture (the laptop `Fn` key is handled in firmware, never reaching us).
+pub fn evdev_binding(hotkey: &Hotkey) -> Result<EvdevBinding> {
+    let trigger = key_keycode(hotkey.key)?.code();
+    let modifiers = hotkey
+        .modifiers
+        .iter()
+        .map(|m| {
+            let (l, r) = modifier_keycodes(*m);
+            [l.code(), r.code()]
+        })
+        .collect();
+    Ok(EvdevBinding { trigger, modifiers })
+}
+
+/// The left/right evdev codes a combo modifier matches.
+fn modifier_keycodes(m: Modifier) -> (KeyCode, KeyCode) {
+    match m {
+        Modifier::Ctrl => (KeyCode::KEY_LEFTCTRL, KeyCode::KEY_RIGHTCTRL),
+        Modifier::Alt => (KeyCode::KEY_LEFTALT, KeyCode::KEY_RIGHTALT),
+        Modifier::Shift => (KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_RIGHTSHIFT),
+        Modifier::Meta => (KeyCode::KEY_LEFTMETA, KeyCode::KEY_RIGHTMETA),
+    }
+}
+
+/// Map a trigger [`Key`] to its evdev code.
+fn key_keycode(key: Key) -> Result<KeyCode> {
+    use Key::*;
+    Ok(match key {
         F1 => KeyCode::KEY_F1,
         F2 => KeyCode::KEY_F2,
         F3 => KeyCode::KEY_F3,
@@ -60,7 +97,54 @@ pub fn evdev_keycode(key: FunctionKey) -> KeyCode {
         F10 => KeyCode::KEY_F10,
         F11 => KeyCode::KEY_F11,
         F12 => KeyCode::KEY_F12,
-    }
+        Space => KeyCode::KEY_SPACE,
+        LeftCtrl => KeyCode::KEY_LEFTCTRL,
+        RightCtrl => KeyCode::KEY_RIGHTCTRL,
+        LeftAlt => KeyCode::KEY_LEFTALT,
+        RightAlt => KeyCode::KEY_RIGHTALT,
+        LeftShift => KeyCode::KEY_LEFTSHIFT,
+        RightShift => KeyCode::KEY_RIGHTSHIFT,
+        LeftMeta => KeyCode::KEY_LEFTMETA,
+        RightMeta => KeyCode::KEY_RIGHTMETA,
+        Letter(c) => letter_keycode(c)?,
+        Fn => bail!(
+            "the Fn key is handled in keyboard firmware and cannot be captured via \
+             evdev on Linux; pick another hotkey (e.g. RightAlt or Ctrl+Shift+F9)"
+        ),
+    })
+}
+
+/// Map an uppercase letter to its evdev code.
+fn letter_keycode(c: char) -> Result<KeyCode> {
+    Ok(match c {
+        'A' => KeyCode::KEY_A,
+        'B' => KeyCode::KEY_B,
+        'C' => KeyCode::KEY_C,
+        'D' => KeyCode::KEY_D,
+        'E' => KeyCode::KEY_E,
+        'F' => KeyCode::KEY_F,
+        'G' => KeyCode::KEY_G,
+        'H' => KeyCode::KEY_H,
+        'I' => KeyCode::KEY_I,
+        'J' => KeyCode::KEY_J,
+        'K' => KeyCode::KEY_K,
+        'L' => KeyCode::KEY_L,
+        'M' => KeyCode::KEY_M,
+        'N' => KeyCode::KEY_N,
+        'O' => KeyCode::KEY_O,
+        'P' => KeyCode::KEY_P,
+        'Q' => KeyCode::KEY_Q,
+        'R' => KeyCode::KEY_R,
+        'S' => KeyCode::KEY_S,
+        'T' => KeyCode::KEY_T,
+        'U' => KeyCode::KEY_U,
+        'V' => KeyCode::KEY_V,
+        'W' => KeyCode::KEY_W,
+        'X' => KeyCode::KEY_X,
+        'Y' => KeyCode::KEY_Y,
+        'Z' => KeyCode::KEY_Z,
+        other => bail!("letter {other:?} has no evdev key code"),
+    })
 }
 
 /// Spawn one reader thread per keyboard; each forwards a press of `target` as a
@@ -69,11 +153,11 @@ pub fn evdev_keycode(key: FunctionKey) -> KeyCode {
 /// The device set is re-scanned forever so USB/Bluetooth keyboards that appear
 /// after `dit` starts are picked up automatically. Dead readers unregister their
 /// path so the monitor can attach again if the kernel reuses the event node.
-pub fn spawn_hotkey(target: KeyCode, tx: UnboundedSender<Control>) -> Result<()> {
-    let target_code = target.code();
+pub fn spawn_hotkey(binding: EvdevBinding, tx: UnboundedSender<Control>) -> Result<()> {
+    let binding = Arc::new(binding);
     let active = Arc::new(Mutex::new(HashSet::<PathBuf>::new()));
     let debouncer = Arc::new(HotkeyDebouncer::default());
-    let found = scan_keyboards(target_code, &tx, &active, &debouncer);
+    let found = scan_keyboards(&binding, &tx, &active, &debouncer);
 
     if found == 0 && !Path::new("/dev/input").exists() {
         bail!(
@@ -89,7 +173,7 @@ pub fn spawn_hotkey(target: KeyCode, tx: UnboundedSender<Control>) -> Result<()>
 
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(2));
-        let newly_found = scan_keyboards(target_code, &tx, &active, &debouncer);
+        let newly_found = scan_keyboards(&binding, &tx, &active, &debouncer);
         if newly_found > 0 {
             info!("attached hotkey listener to {newly_found} new keyboard(s)");
         }
@@ -98,14 +182,14 @@ pub fn spawn_hotkey(target: KeyCode, tx: UnboundedSender<Control>) -> Result<()>
 }
 
 fn scan_keyboards(
-    target_code: u16,
+    binding: &Arc<EvdevBinding>,
     tx: &UnboundedSender<Control>,
     active: &Arc<Mutex<HashSet<PathBuf>>>,
     debouncer: &Arc<HotkeyDebouncer>,
 ) -> usize {
     let mut found = 0;
     for (path, dev) in evdev::enumerate() {
-        if !is_hotkey_keyboard(&dev, target_code) {
+        if !is_hotkey_keyboard(&dev, binding.trigger) {
             continue;
         }
         {
@@ -118,9 +202,8 @@ fn scan_keyboards(
         let tx = tx.clone();
         let active = active.clone();
         let debouncer = debouncer.clone();
-        std::thread::spawn(move || {
-            run_keyboard_reader(path, dev, target_code, tx, active, debouncer)
-        });
+        let binding = binding.clone();
+        std::thread::spawn(move || run_keyboard_reader(path, dev, binding, tx, active, debouncer));
     }
     found
 }
@@ -134,23 +217,50 @@ fn is_hotkey_keyboard(dev: &evdev::Device, target_code: u16) -> bool {
     has_target && looks_like_keyboard
 }
 
+/// True when every modifier the binding requires is currently held (either the
+/// left or right side counts). Vacuously true for a modifier-free hotkey.
+fn modifiers_satisfied(binding: &EvdevBinding, held: &HashSet<u16>) -> bool {
+    binding
+        .modifiers
+        .iter()
+        .all(|pair| pair.iter().any(|code| held.contains(code)))
+}
+
 fn run_keyboard_reader(
     path: PathBuf,
     mut dev: evdev::Device,
-    target_code: u16,
+    binding: Arc<EvdevBinding>,
     tx: UnboundedSender<Control>,
     active: Arc<Mutex<HashSet<PathBuf>>>,
     debouncer: Arc<HotkeyDebouncer>,
 ) {
     let name = dev.name().unwrap_or("<unknown>").to_string();
     info!("hotkey listener attached to {} ({name})", path.display());
+    // Codes that matter for the combo modifier state, tracked per device.
+    let modifier_codes: HashSet<u16> = binding.modifiers.iter().flatten().copied().collect();
+    let mut held: HashSet<u16> = HashSet::new();
     loop {
         match dev.fetch_events() {
             Ok(events) => {
                 for ev in events {
-                    if ev.event_type() == EventType::KEY
-                        && ev.code() == target_code
+                    if ev.event_type() != EventType::KEY {
+                        continue;
+                    }
+                    // Track modifier press/release so a combo can check what's held.
+                    if modifier_codes.contains(&ev.code()) {
+                        match ev.value() {
+                            0 => {
+                                held.remove(&ev.code());
+                            }
+                            1 => {
+                                held.insert(ev.code());
+                            }
+                            _ => {}
+                        }
+                    }
+                    if ev.code() == binding.trigger
                         && ev.value() == 1
+                        && modifiers_satisfied(&binding, &held)
                     {
                         if debouncer.should_fire(Instant::now()) {
                             let _ = tx.send(Control::Toggle);
@@ -293,5 +403,62 @@ mod tests {
         assert!(debouncer.should_fire(start));
         assert!(!debouncer.should_fire(start + Duration::from_millis(100)));
         assert!(debouncer.should_fire(start + Duration::from_millis(400)));
+    }
+
+    #[test]
+    fn evdev_binding_maps_function_keys_and_combos() {
+        // A plain function key: no modifiers, just the trigger code.
+        let f9 = evdev_binding(&Hotkey {
+            modifiers: vec![],
+            key: Key::F9,
+        })
+        .unwrap();
+        assert_eq!(f9.trigger, KeyCode::KEY_F9.code());
+        assert!(f9.modifiers.is_empty());
+
+        // A single modifier key binds as its own trigger.
+        let ralt = evdev_binding(&Hotkey {
+            modifiers: vec![],
+            key: Key::RightAlt,
+        })
+        .unwrap();
+        assert_eq!(ralt.trigger, KeyCode::KEY_RIGHTALT.code());
+
+        // A combo records both sides of each held modifier.
+        let combo = evdev_binding(&Hotkey {
+            modifiers: vec![Modifier::Ctrl, Modifier::Shift],
+            key: Key::F9,
+        })
+        .unwrap();
+        assert_eq!(
+            combo.modifiers,
+            vec![
+                [KeyCode::KEY_LEFTCTRL.code(), KeyCode::KEY_RIGHTCTRL.code()],
+                [KeyCode::KEY_LEFTSHIFT.code(), KeyCode::KEY_RIGHTSHIFT.code()],
+            ]
+        );
+    }
+
+    #[test]
+    fn evdev_binding_rejects_uncapturable_fn_key() {
+        let err = evdev_binding(&Hotkey {
+            modifiers: vec![],
+            key: Key::Fn,
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("Fn"), "error should name the Fn key: {err}");
+    }
+
+    #[test]
+    fn modifiers_satisfied_accepts_either_side() {
+        let binding = EvdevBinding {
+            trigger: KeyCode::KEY_F9.code(),
+            modifiers: vec![[KeyCode::KEY_LEFTCTRL.code(), KeyCode::KEY_RIGHTCTRL.code()]],
+        };
+        let mut held = HashSet::new();
+        assert!(!modifiers_satisfied(&binding, &held));
+        held.insert(KeyCode::KEY_RIGHTCTRL.code());
+        assert!(modifiers_satisfied(&binding, &held));
     }
 }
