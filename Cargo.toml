@@ -14,7 +14,11 @@ categories = ["command-line-utilities", "multimedia::audio"]
 name = "dit"
 path = "src/main.rs"
 
+[features]
+gui = ["dep:eframe"]
+
 [dependencies]
+eframe = { version = "0.28", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
