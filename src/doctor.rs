@@ -8,10 +8,27 @@ use cpal::traits::{DeviceTrait, HostTrait};
 pub fn run(prefer_device: Option<String>) -> Result<()> {
     println!("dit doctor\n==========");
     check_api_key();
+    check_local_engine();
     check_session_env();
     check_linux_input();
     check_audio(prefer_device)?;
     Ok(())
+}
+
+fn check_local_engine() {
+    // Report local engine readiness: whether the default offline model is on disk.
+    use crate::config::DEFAULT_LOCAL_MODEL;
+    use crate::models::resolve_local_model;
+    let present = resolve_local_model(DEFAULT_LOCAL_MODEL).is_some();
+    status(
+        present,
+        "local engine model",
+        if present {
+            "whisper-tiny-local found in ~/.dit/models/"
+        } else {
+            "not installed — run `dit models download whisper-tiny-local` to enable --engine local"
+        },
+    );
 }
 
 fn check_api_key() {
