@@ -53,12 +53,15 @@ fn device_rank(
     let plughw = lower.starts_with("plughw:");
     let hw = lower.starts_with("hw:");
     let sysdefault = lower.starts_with("sysdefault:");
+    // Continuity Camera / iPhone mics on macOS are real capture hardware and
+    // must not fall into the generic catch-all below real ALSA hardware.
+    let continuity_mic = lower.contains("iphone") || lower.contains("continuity");
 
     let rank = if preferred {
         0
     } else if pipewire {
         1
-    } else if plughw {
+    } else if plughw || continuity_mic {
         2
     } else if hw {
         3
@@ -388,6 +391,35 @@ mod tests {
         let preferred = device_rank("USB Audio Device", Some("usb audio"), Some("default"), 5);
         let pipewire = device_rank("pipewire", Some("usb audio"), Some("default"), 0);
         assert!(preferred < pipewire);
+    }
+
+    #[test]
+    fn continuity_iphone_mic_ranks_as_real_capture_device() {
+        let default_name = Some("MacBook Pro Microphone");
+        // Both iPhone and Continuity-branded mics should rank above the generic
+        // built-in catch-all (rank 5) and above the "default" alias (rank 6).
+        let iphone = device_rank("Filip's iPhone Microphone", None, default_name, 3);
+        let continuity = device_rank("Continuity Camera Microphone", None, default_name, 4);
+        let builtin = device_rank("MacBook Pro Microphone", None, default_name, 0);
+        let default_alias = device_rank("default", None, default_name, 1);
+        assert!(
+            iphone < builtin,
+            "iPhone mic (rank {}) should beat generic built-in (rank {})",
+            iphone.0,
+            builtin.0
+        );
+        assert!(
+            continuity < builtin,
+            "Continuity mic (rank {}) should beat generic built-in (rank {})",
+            continuity.0,
+            builtin.0
+        );
+        assert!(
+            iphone < default_alias,
+            "iPhone mic (rank {}) should beat default alias (rank {})",
+            iphone.0,
+            default_alias.0
+        );
     }
 
     #[test]
