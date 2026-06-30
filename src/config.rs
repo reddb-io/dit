@@ -77,6 +77,15 @@ pub struct Hotkey {
     pub key: Key,
 }
 
+/// Which transcription backend to use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Engine {
+    /// ElevenLabs Scribe v2 Realtime — streams audio over a WebSocket (needs API key).
+    Cloud,
+    /// Offline Whisper via candle — records then transcribes locally (no network, no API key).
+    Local,
+}
+
 /// Cross-platform voice dictation via ElevenLabs Scribe v2 Realtime.
 #[derive(Parser, Debug)]
 #[command(name = "dit", version, about)]
@@ -150,6 +159,11 @@ pub struct Cli {
     /// List input audio devices and exit.
     #[arg(long)]
     pub list_devices: bool,
+
+    /// Transcription engine: `cloud` (ElevenLabs Scribe, needs API key) or
+    /// `local` (offline Whisper via candle, needs a model from `dit models`).
+    #[arg(long, default_value = "cloud")]
+    pub engine: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -237,20 +251,13 @@ pub enum ServiceAction {
 // ([`merge`], [`env_layer`]) so it can be unit-tested without touching the real
 // filesystem or process environment.
 
-<<<<<<< HEAD
 pub(crate) const DEFAULT_LANGUAGE: &str = "pt";
 pub(crate) const DEFAULT_MODEL: &str = "scribe_v2_realtime";
+pub const DEFAULT_LOCAL_MODEL: &str = "whisper-tiny-local";
 pub(crate) const DEFAULT_HOTKEY: &str = "F9";
+pub(crate) const DEFAULT_MODE: &str = "toggle";
 pub(crate) const DEFAULT_REGION: &str = "global";
 pub(crate) const DEFAULT_VAD_SILENCE: f64 = 1.5;
-=======
-const DEFAULT_LANGUAGE: &str = "pt";
-const DEFAULT_MODEL: &str = "scribe_v2_realtime";
-const DEFAULT_HOTKEY: &str = "F9";
-const DEFAULT_MODE: &str = "toggle";
-const DEFAULT_REGION: &str = "global";
-const DEFAULT_VAD_SILENCE: f64 = 1.5;
->>>>>>> bb88332 (feat(config): add RecordingMode enum and --mode hold|toggle flag)
 pub const DEFAULT_SESSION_MAX_AGE_DAYS: u64 = 30;
 pub const DEFAULT_SESSION_MAX_COUNT: usize = 100;
 
@@ -275,6 +282,7 @@ pub struct SettingsLayer {
     pub type_hybrid: Option<bool>,
     pub session_max_age_days: Option<u64>,
     pub session_max_count: Option<usize>,
+    pub engine: Option<String>,
 }
 
 /// Settings after merging every layer over the built-in defaults. Distinct from
@@ -296,6 +304,7 @@ struct ResolvedSettings {
     type_hybrid: bool,
     session_max_age_days: u64,
     session_max_count: usize,
+    engine: String,
 }
 
 /// Merge the three override layers over the defaults. Later arguments win:
@@ -340,6 +349,7 @@ fn merge(file: SettingsLayer, env: SettingsLayer, cli: SettingsLayer) -> Resolve
             env.session_max_count,
             cli.session_max_count,
         ),
+        engine: pick("cloud".into(), file.engine, env.engine, cli.engine),
     }
 }
 
@@ -391,6 +401,7 @@ fn env_layer(get: impl Fn(&str) -> Option<String>) -> SettingsLayer {
         type_hybrid: flag("DIT_TYPE"),
         session_max_age_days: s("DIT_SESSION_MAX_AGE_DAYS").and_then(|v| v.parse().ok()),
         session_max_count: s("DIT_SESSION_MAX_COUNT").and_then(|v| v.parse().ok()),
+        engine: s("DIT_ENGINE"),
     }
 }
 
@@ -414,6 +425,7 @@ fn cli_layer(cli: &Cli, matches: &ArgMatches) -> SettingsLayer {
         type_hybrid: on_cli("type_hybrid").then_some(cli.type_hybrid),
         session_max_age_days: None,
         session_max_count: None,
+        engine: on_cli("engine").then(|| cli.engine.clone()),
     }
 }
 
@@ -423,12 +435,8 @@ pub struct Config {
     pub api_key: String,
     pub language: String,
     pub model: String,
-<<<<<<< HEAD
     pub hotkey: Hotkey,
-=======
-    pub hotkey: FunctionKey,
     pub mode: RecordingMode,
->>>>>>> bb88332 (feat(config): add RecordingMode enum and --mode hold|toggle flag)
     pub device: Option<String>,
     pub no_filler: bool,
     pub keyterms: Vec<String>,
@@ -439,6 +447,7 @@ pub struct Config {
     pub type_hybrid: bool,
     pub session_max_age_days: u64,
     pub session_max_count: usize,
+    pub engine: Engine,
 }
 
 /// Target sample rate sent to the API (Scribe expects 16 kHz mono s16le).
@@ -458,16 +467,6 @@ impl Config {
             load_env_file(path);
         }
 
-        let api_key = std::env::var("ELEVENLABS_API_KEY").unwrap_or_default();
-        if api_key.is_empty() {
-            bail!(
-                "ELEVENLABS_API_KEY is not set. Put it in {} or export it in the environment.",
-                env_path
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "~/.dit.env".into())
-            );
-        }
-
         // defaults < config.toml < environment < CLI flags
         let file = config_path()
             .map(|p| load_file_config(&p))
@@ -476,15 +475,36 @@ impl Config {
         let cli_overrides = cli_layer(cli, matches);
         let settings = merge(file, env, cli_overrides);
 
+        let engine = parse_engine(&settings.engine)
+            .with_context(|| format!("unsupported engine: {}", settings.engine))?;
+
+        let api_key = std::env::var("ELEVENLABS_API_KEY").unwrap_or_default();
+        if api_key.is_empty() && engine == Engine::Cloud {
+            bail!(
+                "ELEVENLABS_API_KEY is not set. Put it in {} or export it in the environment.",
+                env_path
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "~/.dit.env".into())
+            );
+        }
+
         let hotkey = parse_hotkey(&settings.hotkey)
             .with_context(|| format!("unsupported hotkey: {}", settings.hotkey))?;
         let mode = parse_mode(&settings.mode)
             .with_context(|| format!("unsupported mode: {}", settings.mode))?;
 
+        // When using the local engine and the user didn't explicitly set a model,
+        // default to the local model instead of the cloud model.
+        let model = if engine == Engine::Local && settings.model == DEFAULT_MODEL {
+            DEFAULT_LOCAL_MODEL.to_string()
+        } else {
+            settings.model
+        };
+
         Ok(Self {
             api_key,
             language: settings.language,
-            model: settings.model,
+            model,
             hotkey,
             mode,
             device: settings.device,
@@ -497,6 +517,7 @@ impl Config {
             type_hybrid: settings.type_hybrid,
             session_max_age_days: settings.session_max_age_days,
             session_max_count: settings.session_max_count,
+            engine,
         })
     }
 
@@ -652,7 +673,24 @@ pub(crate) fn load_env_file(path: &PathBuf) {
     }
 }
 
-<<<<<<< HEAD
+/// Parse the engine name into an [`Engine`].
+fn parse_engine(name: &str) -> Result<Engine> {
+    match name.to_ascii_lowercase().as_str() {
+        "cloud" => Ok(Engine::Cloud),
+        "local" => Ok(Engine::Local),
+        other => bail!("engine must be `cloud` or `local`, got {other}"),
+    }
+}
+
+/// Parse a recording mode string into a [`RecordingMode`].
+fn parse_mode(s: &str) -> Result<RecordingMode> {
+    match s.to_ascii_lowercase().as_str() {
+        "toggle" => Ok(RecordingMode::Toggle),
+        "hold" => Ok(RecordingMode::Hold),
+        other => bail!("unsupported mode: {other} (use 'toggle' or 'hold')"),
+    }
+}
+
 /// Parse a hotkey spec into a [`Hotkey`].
 ///
 /// Accepts a single key (`F9`, `RightAlt`, `D`, `Space`) or a `+`-separated combo
@@ -707,21 +745,6 @@ fn parse_key(seg: &str) -> Result<Key> {
     use Key::*;
     let token = normalize_segment(seg);
     Ok(match token.as_str() {
-=======
-/// Parse a recording mode string into a [`RecordingMode`].
-fn parse_mode(s: &str) -> Result<RecordingMode> {
-    match s.to_ascii_lowercase().as_str() {
-        "toggle" => Ok(RecordingMode::Toggle),
-        "hold" => Ok(RecordingMode::Hold),
-        other => bail!("unsupported mode: {other} (use 'toggle' or 'hold')"),
-    }
-}
-
-/// Parse a function-key name into a [`FunctionKey`].
-fn parse_hotkey(name: &str) -> Result<FunctionKey> {
-    use FunctionKey::*;
-    let key = match name.to_ascii_uppercase().as_str() {
->>>>>>> bb88332 (feat(config): add RecordingMode enum and --mode hold|toggle flag)
         "F1" => F1,
         "F2" => F2,
         "F3" => F3,
@@ -1063,15 +1086,11 @@ mod tests {
             api_key: "key".into(),
             language: language.into(),
             model: "scribe_v2_realtime".into(),
-<<<<<<< HEAD
             hotkey: Hotkey {
                 modifiers: vec![],
                 key: Key::F9,
             },
-=======
-            hotkey: FunctionKey::F9,
             mode: RecordingMode::Toggle,
->>>>>>> bb88332 (feat(config): add RecordingMode enum and --mode hold|toggle flag)
             device: None,
             no_filler: false,
             keyterms: vec![],
@@ -1082,6 +1101,7 @@ mod tests {
             type_hybrid: false,
             session_max_age_days: DEFAULT_SESSION_MAX_AGE_DAYS,
             session_max_count: DEFAULT_SESSION_MAX_COUNT,
+            engine: Engine::Cloud,
         }
     }
 
@@ -1148,7 +1168,6 @@ mod tests {
             !url.contains("language_code"),
             "url should have no language_code: {url}"
         );
-<<<<<<< HEAD
     }
 
     #[test]
@@ -1199,8 +1218,6 @@ mod tests {
         assert!(resolved.no_filler);
 
         let _ = std::fs::remove_dir_all(&dir);
-=======
->>>>>>> bb88332 (feat(config): add RecordingMode enum and --mode hold|toggle flag)
     }
 
     #[test]
