@@ -175,6 +175,26 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
+/// Public view of a catalog entry for the settings GUI.
+pub struct CatalogEntry {
+    pub id: &'static str,
+    pub description: &'static str,
+    pub installed: bool,
+}
+
+/// List all catalog entries with their current installation status.
+/// Reads the filesystem; cheap for the small catalog.
+pub fn list_catalog() -> Vec<CatalogEntry> {
+    CATALOG
+        .iter()
+        .map(|e| CatalogEntry {
+            id: e.id,
+            description: e.description,
+            installed: model_path(e).exists(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
