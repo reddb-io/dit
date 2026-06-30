@@ -70,7 +70,7 @@ pub fn run(action: &ModelsAction) -> Result<()> {
         }
 
         ModelsAction::List => {
-            println!("{:<20} {:<12} {}", "ID", "INSTALLED", "DESCRIPTION");
+            println!("{:<20} {:<12} DESCRIPTION", "ID", "INSTALLED");
             for entry in CATALOG {
                 let installed = if model_path(entry).exists() { "yes" } else { "no" };
                 println!("{:<20} {:<12} {}", entry.id, installed, entry.description);
@@ -192,9 +192,9 @@ mod tests {
         // In a fresh/CI environment the model file won't exist on disk.
         // We verify the function doesn't panic and returns None for missing files.
         let result = resolve_model("whisper-tiny");
-        if result.is_some() {
+        if let Some(item) = result {
             // Model is genuinely present — that's fine too.
-            assert!(result.unwrap().exists());
+            assert!(item.exists());
         }
     }
 
