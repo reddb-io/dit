@@ -176,92 +176,90 @@ impl SettingsApp {
 
 #[cfg(feature = "gui")]
 impl eframe::App for SettingsApp {
-    fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
         use eframe::egui;
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::General, "General");
-                ui.selectable_value(&mut self.tab, Tab::Account, "Account");
-            });
-            ui.separator();
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.tab, Tab::General, "General");
+            ui.selectable_value(&mut self.tab, Tab::Account, "Account");
+        });
+        ui.separator();
 
-            match self.tab {
-                Tab::General => {
-                    egui::Grid::new("general")
-                        .num_columns(2)
-                        .spacing([40.0, 6.0])
-                        .show(ui, |ui| {
-                            ui.label("Language:");
-                            ui.text_edit_singleline(&mut self.language);
-                            ui.end_row();
+        match self.tab {
+            Tab::General => {
+                egui::Grid::new("general")
+                    .num_columns(2)
+                    .spacing([40.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Language:");
+                        ui.text_edit_singleline(&mut self.language);
+                        ui.end_row();
 
-                            ui.label("Hotkey:");
-                            egui::ComboBox::from_id_salt("hotkey")
-                                .selected_text(&self.hotkey)
-                                .show_ui(ui, |ui| {
-                                    for key in &[
-                                        "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9",
-                                        "F10", "F11", "F12",
-                                    ] {
-                                        ui.selectable_value(
-                                            &mut self.hotkey,
-                                            key.to_string(),
-                                            *key,
-                                        );
-                                    }
-                                });
-                            ui.end_row();
+                        ui.label("Hotkey:");
+                        egui::ComboBox::from_id_salt("hotkey")
+                            .selected_text(&self.hotkey)
+                            .show_ui(ui, |ui| {
+                                for key in &[
+                                    "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9",
+                                    "F10", "F11", "F12",
+                                ] {
+                                    ui.selectable_value(
+                                        &mut self.hotkey,
+                                        key.to_string(),
+                                        *key,
+                                    );
+                                }
+                            });
+                        ui.end_row();
 
-                            ui.label("Model:");
-                            ui.text_edit_singleline(&mut self.model);
-                            ui.end_row();
+                        ui.label("Model:");
+                        ui.text_edit_singleline(&mut self.model);
+                        ui.end_row();
 
-                            ui.label("Region:");
-                            egui::ComboBox::from_id_salt("region")
-                                .selected_text(&self.region)
-                                .show_ui(ui, |ui| {
-                                    for r in &["global", "us", "eu", "in"] {
-                                        ui.selectable_value(
-                                            &mut self.region,
-                                            r.to_string(),
-                                            *r,
-                                        );
-                                    }
-                                });
-                            ui.end_row();
-                        });
-                }
-                Tab::Account => {
-                    egui::Grid::new("account")
-                        .num_columns(2)
-                        .spacing([40.0, 6.0])
-                        .show(ui, |ui| {
-                            ui.label("ElevenLabs API key:");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.api_key)
-                                    .password(!self.show_key)
-                                    .desired_width(280.0),
-                            );
-                            ui.end_row();
-
-                            ui.label("");
-                            ui.checkbox(&mut self.show_key, "Show key");
-                            ui.end_row();
-                        });
-                }
+                        ui.label("Region:");
+                        egui::ComboBox::from_id_salt("region")
+                            .selected_text(&self.region)
+                            .show_ui(ui, |ui| {
+                                for r in &["global", "us", "eu", "in"] {
+                                    ui.selectable_value(
+                                        &mut self.region,
+                                        r.to_string(),
+                                        *r,
+                                    );
+                                }
+                            });
+                        ui.end_row();
+                    });
             }
+            Tab::Account => {
+                egui::Grid::new("account")
+                    .num_columns(2)
+                    .spacing([40.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("ElevenLabs API key:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.api_key)
+                                .password(!self.show_key)
+                                .desired_width(280.0),
+                        );
+                        ui.end_row();
 
-            ui.add_space(12.0);
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
-                    self.on_save();
-                }
-                if !self.status.is_empty() {
-                    ui.label(&self.status);
-                }
-            });
+                        ui.label("");
+                        ui.checkbox(&mut self.show_key, "Show key");
+                        ui.end_row();
+                    });
+            }
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Save").clicked() {
+                self.on_save();
+            }
+            if !self.status.is_empty() {
+                ui.label(&self.status);
+            }
         });
     }
 }

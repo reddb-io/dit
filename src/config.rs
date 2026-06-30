@@ -114,8 +114,7 @@ pub enum Command {
         #[command(subcommand)]
         action: ModelsAction,
     },
-    /// Open the settings GUI (requires the `gui` cargo feature).
-    #[cfg(feature = "gui")]
+    /// Open the settings GUI (requires a build with the `gui` cargo feature).
     Settings,
 }
 

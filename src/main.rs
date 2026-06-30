@@ -94,7 +94,6 @@ fn main() -> Result<()> {
     if let Some(Command::Models { action }) = &cli.command {
         return models::run(action);
     }
-    #[cfg(feature = "gui")]
     if let Some(Command::Settings) = &cli.command {
         return settings::run();
     }
