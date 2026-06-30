@@ -149,7 +149,7 @@ jobs:
           # Cross-link armv7 against the armhf libasound in the foreign sysroot.
           PKG_CONFIG_ALLOW_CROSS: ${{ matrix.arm_cross && '1' || '' }}
           PKG_CONFIG_PATH: ${{ matrix.arm_cross && '/usr/lib/arm-linux-gnueabihf/pkgconfig' || '' }}
-        run: cargo zigbuild --locked --release --target ${{ matrix.zig_target }} --bin dit
+        run: cargo zigbuild --locked --release --features local --target ${{ matrix.zig_target }} --bin dit
 
       # --- static musl build (Docker) ------------------------------------------
       - name: Build (musl + static ALSA)
@@ -177,14 +177,14 @@ jobs:
               export PKG_CONFIG_ALLOW_CROSS=1
               export ALSA_STATIC=1
               export RUSTFLAGS="-C target-feature=+crt-static"
-              cargo build --locked --release --target "${MUSL_TARGET}" --bin dit
+              cargo build --locked --release --features local --target "${MUSL_TARGET}" --bin dit
             '
           sudo chown -R "$(id -u):$(id -g)" "target/${{ matrix.target }}"
 
       # --- native build (macOS / Windows) --------------------------------------
       - name: Build (native)
         if: matrix.kind == 'native'
-        run: cargo build --locked --release --target ${{ matrix.target }} --bin dit
+        run: cargo build --locked --release --features local --target ${{ matrix.target }} --bin dit
 
       - name: Package asset
         shell: bash
