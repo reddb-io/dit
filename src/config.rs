@@ -11,10 +11,15 @@ use clap::parser::ValueSource;
 use clap::{ArgMatches, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
-/// A platform-neutral toggle key (F1..F12). Converted to the right per-OS
-/// representation where it's used (global-hotkey on macOS/Windows, evdev on Linux).
+/// A platform-neutral trigger key. This is the key the user actually presses to
+/// toggle dictation. It can be a function key (F1..F12), a letter, Space, or a
+/// single modifier key used on its own (e.g. Right Alt). `Fn` is recognised so we
+/// can emit a clear "not capturable" error rather than silently ignoring it.
+///
+/// Converted to the right per-OS representation where it's used (global-hotkey on
+/// macOS/Windows, evdev on Linux).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FunctionKey {
+pub enum Key {
     F1,
     F2,
     F3,
@@ -27,6 +32,39 @@ pub enum FunctionKey {
     F10,
     F11,
     F12,
+    /// A letter key. Always stored uppercase (`'A'`..=`'Z'`).
+    Letter(char),
+    Space,
+    LeftCtrl,
+    RightCtrl,
+    LeftAlt,
+    RightAlt,
+    LeftShift,
+    RightShift,
+    LeftMeta,
+    RightMeta,
+    /// The laptop `Fn` key — recognised, but not capturable through the global
+    /// hotkey/evdev APIs we use, so platform mapping rejects it with a clear error.
+    Fn,
+}
+
+/// A modifier that can prefix a combo (e.g. the `Ctrl` and `Shift` in
+/// `Ctrl+Shift+F9`). Left/right are unified — a combo modifier matches either side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Modifier {
+    Ctrl,
+    Alt,
+    Shift,
+    Meta,
+}
+
+/// A fully-parsed hotkey: zero or more held modifiers plus the trigger key that
+/// fires the toggle. A bare modifier key (Right Alt on its own) is represented as
+/// an empty `modifiers` list with `key` set to that modifier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hotkey {
+    pub modifiers: Vec<Modifier>,
+    pub key: Key,
 }
 
 /// Cross-platform voice dictation via ElevenLabs Scribe v2 Realtime.
@@ -46,7 +84,8 @@ pub struct Cli {
     #[arg(long, default_value = "scribe_v2_realtime")]
     pub model: String,
 
-    /// Toggle hotkey. Supports F1..F12 (e.g. `F9`).
+    /// Toggle hotkey. Accepts a function key (`F9`), a single modifier key
+    /// (`RightAlt`), a letter (`D`), or a combo (`Ctrl+Shift+F9`).
     #[arg(long, default_value = "F9")]
     pub hotkey: String,
 
@@ -323,7 +362,7 @@ pub struct Config {
     pub api_key: String,
     pub language: String,
     pub model: String,
-    pub hotkey: FunctionKey,
+    pub hotkey: Hotkey,
     pub device: Option<String>,
     pub no_filler: bool,
     pub keyterms: Vec<String>,
@@ -467,10 +506,60 @@ fn load_env_file(path: &PathBuf) {
     }
 }
 
-/// Parse a function-key name into a [`FunctionKey`].
-fn parse_hotkey(name: &str) -> Result<FunctionKey> {
-    use FunctionKey::*;
-    let key = match name.to_ascii_uppercase().as_str() {
+/// Parse a hotkey spec into a [`Hotkey`].
+///
+/// Accepts a single key (`F9`, `RightAlt`, `D`, `Space`) or a `+`-separated combo
+/// (`Ctrl+Shift+F9`, `Alt+Space`). Every segment but the last must be a modifier;
+/// the last segment is the trigger key (which may itself be a modifier key, giving
+/// either a bare modifier-key binding or a modifier+modifier combo).
+fn parse_hotkey(spec: &str) -> Result<Hotkey> {
+    let segments: Vec<&str> = spec.split('+').map(str::trim).collect();
+    if segments.iter().any(|s| s.is_empty()) {
+        bail!("malformed hotkey {spec:?}: empty key segment");
+    }
+    let (trigger, mods) = segments
+        .split_last()
+        .expect("split on '+' always yields at least one segment");
+
+    let modifiers = mods
+        .iter()
+        .map(|m| {
+            parse_modifier(m)
+                .with_context(|| format!("{m:?} is not a modifier (in hotkey {spec:?})"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let key = parse_key(trigger)
+        .with_context(|| format!("unrecognized key {trigger:?} in hotkey {spec:?}"))?;
+
+    Ok(Hotkey { modifiers, key })
+}
+
+/// Normalise a segment for matching: uppercase with spaces/underscores removed, so
+/// `Right Alt`, `right_alt` and `RIGHTALT` all collapse to the same token.
+fn normalize_segment(seg: &str) -> String {
+    seg.chars()
+        .filter(|c| !c.is_whitespace() && *c != '_')
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+/// Parse a combo modifier prefix (`Ctrl`, `Alt`, `Shift`, `Meta`/`Super`/`Cmd`/`Win`).
+fn parse_modifier(seg: &str) -> Result<Modifier> {
+    Ok(match normalize_segment(seg).as_str() {
+        "CTRL" | "CONTROL" => Modifier::Ctrl,
+        "ALT" | "OPTION" => Modifier::Alt,
+        "SHIFT" => Modifier::Shift,
+        "META" | "SUPER" | "WIN" | "WINDOWS" | "CMD" | "COMMAND" => Modifier::Meta,
+        other => bail!("unknown modifier {other:?}"),
+    })
+}
+
+/// Parse the trigger key segment.
+fn parse_key(seg: &str) -> Result<Key> {
+    use Key::*;
+    let token = normalize_segment(seg);
+    Ok(match token.as_str() {
         "F1" => F1,
         "F2" => F2,
         "F3" => F3,
@@ -483,9 +572,21 @@ fn parse_hotkey(name: &str) -> Result<FunctionKey> {
         "F10" => F10,
         "F11" => F11,
         "F12" => F12,
-        other => bail!("only F1..F12 are supported, got {other}"),
-    };
-    Ok(key)
+        "SPACE" => Space,
+        "LEFTCTRL" | "CTRLLEFT" | "LCTRL" => LeftCtrl,
+        "RIGHTCTRL" | "CTRLRIGHT" | "RCTRL" => RightCtrl,
+        "LEFTALT" | "ALTLEFT" | "LALT" => LeftAlt,
+        "RIGHTALT" | "ALTRIGHT" | "RALT" | "ALTGR" => RightAlt,
+        "LEFTSHIFT" | "SHIFTLEFT" | "LSHIFT" => LeftShift,
+        "RIGHTSHIFT" | "SHIFTRIGHT" | "RSHIFT" => RightShift,
+        "LEFTMETA" | "METALEFT" | "LMETA" | "LSUPER" | "LWIN" => LeftMeta,
+        "RIGHTMETA" | "METARIGHT" | "RMETA" | "RSUPER" | "RWIN" => RightMeta,
+        "FN" => Fn,
+        single if single.len() == 1 && single.as_bytes()[0].is_ascii_alphabetic() => {
+            Letter(single.as_bytes()[0] as char)
+        }
+        other => bail!("unknown key {other:?}"),
+    })
 }
 
 #[cfg(test)]
@@ -676,12 +777,103 @@ mod tests {
         assert_eq!(resolved.language, "es");
     }
 
+    #[test]
+    fn parse_hotkey_handles_function_keys() {
+        // F1..F12 keep their plain, modifier-free meaning (case-insensitive).
+        assert_eq!(
+            parse_hotkey("F9").unwrap(),
+            Hotkey {
+                modifiers: vec![],
+                key: Key::F9
+            }
+        );
+        assert_eq!(
+            parse_hotkey("f12").unwrap(),
+            Hotkey {
+                modifiers: vec![],
+                key: Key::F12
+            }
+        );
+    }
+
+    #[test]
+    fn parse_hotkey_handles_single_modifier_keys() {
+        // A lone modifier key is a valid trigger with no held modifiers, and the
+        // spelling is forgiving about side/case/spacing.
+        for spelling in ["RightAlt", "right alt", "ALT_RIGHT", "AltGr"] {
+            assert_eq!(
+                parse_hotkey(spelling).unwrap(),
+                Hotkey {
+                    modifiers: vec![],
+                    key: Key::RightAlt
+                },
+                "spelling {spelling:?} should parse to Right Alt"
+            );
+        }
+        assert_eq!(
+            parse_hotkey("RightCtrl").unwrap(),
+            Hotkey {
+                modifiers: vec![],
+                key: Key::RightCtrl
+            }
+        );
+    }
+
+    #[test]
+    fn parse_hotkey_handles_combos() {
+        // Held modifiers + a trigger key, in order.
+        assert_eq!(
+            parse_hotkey("Ctrl+Shift+F9").unwrap(),
+            Hotkey {
+                modifiers: vec![Modifier::Ctrl, Modifier::Shift],
+                key: Key::F9
+            }
+        );
+        // Combos can end in a letter or Space, and aliases resolve.
+        assert_eq!(
+            parse_hotkey("Super+Space").unwrap(),
+            Hotkey {
+                modifiers: vec![Modifier::Meta],
+                key: Key::Space
+            }
+        );
+        assert_eq!(
+            parse_hotkey("alt + d").unwrap(),
+            Hotkey {
+                modifiers: vec![Modifier::Alt],
+                key: Key::Letter('D')
+            }
+        );
+    }
+
+    #[test]
+    fn parse_hotkey_rejects_unknown_and_malformed_keys() {
+        // An unrecognised key name is an error, not a silent no-op.
+        let err = parse_hotkey("Banana").unwrap_err().to_string();
+        assert!(
+            err.contains("Banana"),
+            "error should name the bad key: {err}"
+        );
+
+        // A modifier in trigger position that isn't a real key is rejected.
+        assert!(parse_hotkey("Ctrl+Nope").is_err());
+
+        // A trailing '+' leaves an empty trigger segment.
+        assert!(parse_hotkey("Ctrl+").is_err());
+
+        // A non-modifier in a modifier (prefix) position is rejected.
+        assert!(parse_hotkey("F9+F10").is_err());
+    }
+
     fn dummy_config(language: &str) -> Config {
         Config {
             api_key: "key".into(),
             language: language.into(),
             model: "scribe_v2_realtime".into(),
-            hotkey: FunctionKey::F9,
+            hotkey: Hotkey {
+                modifiers: vec![],
+                key: Key::F9,
+            },
             device: None,
             no_filler: false,
             keyterms: vec![],

@@ -321,9 +321,17 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
     info!("ready — press the hotkey (or use the tray) to start/stop dictation");
 
     // Hotkey via evdev (/dev/input) — works on X11 and Wayland alike.
-    if let Err(e) = linux_input::spawn_hotkey(linux_input::evdev_keycode(cfg.hotkey), tx) {
-        error!("{e:#}");
-        notify::notify("dit — hotkey unavailable", &format!("{e}"));
+    match linux_input::evdev_binding(&cfg.hotkey) {
+        Ok(binding) => {
+            if let Err(e) = linux_input::spawn_hotkey(binding, tx) {
+                error!("{e:#}");
+                notify::notify("dit — hotkey unavailable", &format!("{e}"));
+            }
+        }
+        Err(e) => {
+            error!("{e:#}");
+            notify::notify("dit — hotkey unavailable", &format!("{e}"));
+        }
     }
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));
@@ -338,9 +346,95 @@ enum UserEvent {
     SetState(IconState),
 }
 
+/// Map our neutral hotkey to the `global-hotkey` `(modifiers, code)` pair. Returns
+/// a clear error for keys the OS hotkey API can't capture (e.g. the laptop `Fn`).
+#[cfg(not(target_os = "linux"))]
+fn global_hotkey_binding(
+    hotkey: &config::Hotkey,
+) -> Result<(
+    Option<global_hotkey::hotkey::Modifiers>,
+    global_hotkey::hotkey::Code,
+)> {
+    use anyhow::bail;
+    use config::{Key, Modifier};
+    use global_hotkey::hotkey::{Code, Modifiers};
+
+    let mut mods = Modifiers::empty();
+    for m in &hotkey.modifiers {
+        mods |= match m {
+            Modifier::Ctrl => Modifiers::CONTROL,
+            Modifier::Alt => Modifiers::ALT,
+            Modifier::Shift => Modifiers::SHIFT,
+            // global-hotkey only honours ALT/SHIFT/CONTROL/SUPER; SUPER is the
+            // Cmd/Win/Meta key on every platform.
+            Modifier::Meta => Modifiers::SUPER,
+        };
+    }
+
+    let code = match hotkey.key {
+        Key::F1 => Code::F1,
+        Key::F2 => Code::F2,
+        Key::F3 => Code::F3,
+        Key::F4 => Code::F4,
+        Key::F5 => Code::F5,
+        Key::F6 => Code::F6,
+        Key::F7 => Code::F7,
+        Key::F8 => Code::F8,
+        Key::F9 => Code::F9,
+        Key::F10 => Code::F10,
+        Key::F11 => Code::F11,
+        Key::F12 => Code::F12,
+        Key::Space => Code::Space,
+        Key::LeftCtrl => Code::ControlLeft,
+        Key::RightCtrl => Code::ControlRight,
+        Key::LeftAlt => Code::AltLeft,
+        Key::RightAlt => Code::AltRight,
+        Key::LeftShift => Code::ShiftLeft,
+        Key::RightShift => Code::ShiftRight,
+        Key::LeftMeta => Code::MetaLeft,
+        Key::RightMeta => Code::MetaRight,
+        Key::Letter(c) => match c {
+            'A' => Code::KeyA,
+            'B' => Code::KeyB,
+            'C' => Code::KeyC,
+            'D' => Code::KeyD,
+            'E' => Code::KeyE,
+            'F' => Code::KeyF,
+            'G' => Code::KeyG,
+            'H' => Code::KeyH,
+            'I' => Code::KeyI,
+            'J' => Code::KeyJ,
+            'K' => Code::KeyK,
+            'L' => Code::KeyL,
+            'M' => Code::KeyM,
+            'N' => Code::KeyN,
+            'O' => Code::KeyO,
+            'P' => Code::KeyP,
+            'Q' => Code::KeyQ,
+            'R' => Code::KeyR,
+            'S' => Code::KeyS,
+            'T' => Code::KeyT,
+            'U' => Code::KeyU,
+            'V' => Code::KeyV,
+            'W' => Code::KeyW,
+            'X' => Code::KeyX,
+            'Y' => Code::KeyY,
+            'Z' => Code::KeyZ,
+            other => bail!("letter {other:?} has no global-hotkey code"),
+        },
+        Key::Fn => bail!(
+            "the Fn key is handled in keyboard firmware and cannot be captured by \
+             the OS global-hotkey API; pick another hotkey (e.g. RightAlt or Ctrl+Shift+F9)"
+        ),
+    };
+
+    let mods = if mods.is_empty() { None } else { Some(mods) };
+    Ok((mods, code))
+}
+
 #[cfg(not(target_os = "linux"))]
 fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Result<()> {
-    use global_hotkey::hotkey::{Code, HotKey};
+    use global_hotkey::hotkey::HotKey;
     use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
     use std::time::{Duration, Instant};
     use tao::event::Event;
@@ -348,20 +442,7 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, TrayIconBuilder};
 
-    let code = match cfg.hotkey {
-        config::FunctionKey::F1 => Code::F1,
-        config::FunctionKey::F2 => Code::F2,
-        config::FunctionKey::F3 => Code::F3,
-        config::FunctionKey::F4 => Code::F4,
-        config::FunctionKey::F5 => Code::F5,
-        config::FunctionKey::F6 => Code::F6,
-        config::FunctionKey::F7 => Code::F7,
-        config::FunctionKey::F8 => Code::F8,
-        config::FunctionKey::F9 => Code::F9,
-        config::FunctionKey::F10 => Code::F10,
-        config::FunctionKey::F11 => Code::F11,
-        config::FunctionKey::F12 => Code::F12,
-    };
+    let (modifiers, code) = global_hotkey_binding(&cfg.hotkey)?;
 
     let (tx, rx) = mpsc::unbounded_channel::<Control>();
     let (state_tx, mut state_rx) = mpsc::unbounded_channel::<IconState>();
@@ -378,7 +459,7 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
     });
 
     let hotkey_manager = GlobalHotKeyManager::new()?;
-    let hotkey = HotKey::new(None, code);
+    let hotkey = HotKey::new(modifiers, code);
     if let Err(e) = hotkey_manager.register(hotkey) {
         tracing::warn!("could not register the hotkey: {e}");
     }
