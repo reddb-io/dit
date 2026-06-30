@@ -866,6 +866,7 @@ dependencies = [
  "tao",
  "tokio",
  "tokio-tungstenite",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "tray-icon",
