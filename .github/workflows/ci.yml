@@ -61,5 +61,9 @@ jobs:
       - name: Build (gui feature)
         run: cargo build --release --features gui
 
+      - name: Build (local engine)
+        if: runner.os == 'Linux'
+        run: cargo build --release --features local
+
       - name: Test
         run: cargo test --release
