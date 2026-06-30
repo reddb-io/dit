@@ -44,10 +44,36 @@ use config::{Cli, Command, Config};
 use inject::Injector;
 use transcribe::run_session;
 
-/// Control messages from the UI to the async session manager.
+/// Control messages from the UI (tray + hotkey) to the async session manager.
+///
+/// `Toggle` starts/stops a session. `Reconfigure` swaps a runtime knob
+/// (device/language/mode/engine) so the *next* session uses it without
+/// restarting the process, and persists the choice. `SetPaused` suspends the
+/// hotkey (toggles are ignored while paused). `OpenLastTranscript` opens the
+/// most recent session log in the platform's default handler.
 pub enum Control {
     Toggle,
+    Reconfigure(config::Reconfigure),
+    SetPaused(bool),
+    OpenLastTranscript,
 }
+
+/// Language presets offered in the tray "Language" submenu: (label, code).
+const LANGUAGE_PRESETS: &[(&str, &str)] = &[
+    ("Português", "pt"),
+    ("English", "en"),
+    ("Español", "es"),
+    ("Français", "fr"),
+    ("Deutsch", "de"),
+    ("Italiano", "it"),
+    ("Auto-detect", "auto"),
+];
+
+/// Engine/model presets offered in the tray "Engine" submenu: (label, model id).
+const ENGINE_PRESETS: &[(&str, &str)] = &[("Scribe v2 Realtime", "scribe_v2_realtime")];
+
+/// Dictation mode presets offered in the tray "Mode" submenu: (label, no_filler).
+const MODE_PRESETS: &[(&str, bool)] = &[("Verbatim", false), ("Remove fillers", true)];
 
 /// What the tray icon should show.
 #[derive(Clone, Copy, Debug)]
@@ -116,33 +142,53 @@ fn main() -> Result<()> {
 /// Owns the lifecycle of the current session and toggles it on each request.
 /// `run_session` reports the Idle/Recording/Error state itself over `state_tx`.
 async fn manager(
-    cfg: Config,
+    mut cfg: Config,
     injector: Injector,
     mut rx: UnboundedReceiver<Control>,
     state_tx: UnboundedSender<IconState>,
 ) {
     let mut current: Option<(Arc<Notify>, JoinHandle<Result<()>>)> = None;
+    let mut paused = false;
 
-    while let Some(Control::Toggle) = rx.recv().await {
-        match current.take() {
-            Some((stop, handle)) if !handle.is_finished() => {
-                stop.notify_one();
-                tokio::spawn(async move {
-                    if let Ok(Err(e)) = handle.await {
-                        error!("session error: {e:#}");
-                    }
-                });
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            // Paused suspends the hotkey: toggles are ignored until resumed, but
+            // a session already running keeps going.
+            Control::Toggle if paused => {}
+            Control::Toggle => match current.take() {
+                Some((stop, handle)) if !handle.is_finished() => {
+                    stop.notify_one();
+                    tokio::spawn(async move {
+                        if let Ok(Err(e)) = handle.await {
+                            error!("session error: {e:#}");
+                        }
+                    });
+                }
+                _ => {
+                    let stop = Arc::new(Notify::new());
+                    let handle = tokio::spawn(run_session(
+                        cfg.clone(),
+                        injector.clone(),
+                        stop.clone(),
+                        state_tx.clone(),
+                    ));
+                    current = Some((stop, handle));
+                }
+            },
+            // Apply to the live config so the next session uses it, and persist
+            // the choice to ~/.dit/config.toml so it survives a restart.
+            Control::Reconfigure(r) => {
+                r.apply_to(&mut cfg);
+                if let Err(e) = r.persist() {
+                    error!("could not persist setting change: {e:#}");
+                }
+                info!("reconfigured: {r:?} (applies on next session)");
             }
-            _ => {
-                let stop = Arc::new(Notify::new());
-                let handle = tokio::spawn(run_session(
-                    cfg.clone(),
-                    injector.clone(),
-                    stop.clone(),
-                    state_tx.clone(),
-                ));
-                current = Some((stop, handle));
+            Control::SetPaused(p) => {
+                paused = p;
+                info!("hotkey {}", if p { "paused" } else { "resumed" });
             }
+            Control::OpenLastTranscript => output::open_last_transcript(),
         }
     }
 }
@@ -247,6 +293,16 @@ fn tooltip(state: IconState) -> &'static str {
 struct DitTray {
     state: IconState,
     tx: tokio::sync::mpsc::UnboundedSender<Control>,
+    /// Live mirror of the runtime knobs, so the submenus can show which option
+    /// is currently selected (and the Pause item its checkmark). Updated in the
+    /// activate callbacks alongside sending the `Reconfigure`/`SetPaused`.
+    device: Option<String>,
+    language: String,
+    no_filler: bool,
+    model: String,
+    paused: bool,
+    /// Input devices to offer, captured once at startup.
+    devices: Vec<String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -274,6 +330,133 @@ impl ksni::Tray for DitTray {
     }
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
+
+        // ── Device submenu: "System default" + each enumerated input device ──
+        let mut device_opts: Vec<RadioItem> = vec![RadioItem {
+            label: "System default".into(),
+            ..Default::default()
+        }];
+        device_opts.extend(self.devices.iter().map(|n| RadioItem {
+            label: n.clone(),
+            ..Default::default()
+        }));
+        // selected: 0 == default, else 1-based index into `devices`.
+        let device_selected = match &self.device {
+            None => 0,
+            Some(cur) => self
+                .devices
+                .iter()
+                .position(|n| n == cur)
+                .map(|i| i + 1)
+                .unwrap_or(usize::MAX),
+        };
+        let devices = self.devices.clone();
+        let device_menu = SubMenu {
+            label: "Device".into(),
+            submenu: vec![RadioGroup {
+                selected: device_selected,
+                select: Box::new(move |t: &mut DitTray, idx: usize| {
+                    let dev = if idx == 0 {
+                        None
+                    } else {
+                        devices.get(idx - 1).cloned()
+                    };
+                    t.device = dev.clone();
+                    let _ = t.tx.send(Control::Reconfigure(config::Reconfigure::Device(dev)));
+                }),
+                options: device_opts,
+            }
+            .into()],
+            ..Default::default()
+        };
+
+        // ── Language submenu ──
+        let lang_selected = LANGUAGE_PRESETS
+            .iter()
+            .position(|(_, code)| *code == self.language)
+            .unwrap_or(usize::MAX);
+        let language_menu = SubMenu {
+            label: "Language".into(),
+            submenu: vec![RadioGroup {
+                selected: lang_selected,
+                select: Box::new(|t: &mut DitTray, idx: usize| {
+                    if let Some((_, code)) = LANGUAGE_PRESETS.get(idx) {
+                        t.language = (*code).into();
+                        let _ = t.tx.send(Control::Reconfigure(
+                            config::Reconfigure::Language((*code).into()),
+                        ));
+                    }
+                }),
+                options: LANGUAGE_PRESETS
+                    .iter()
+                    .map(|(label, _)| RadioItem {
+                        label: (*label).into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            }
+            .into()],
+            ..Default::default()
+        };
+
+        // ── Mode submenu (verbatim vs. filler removal) ──
+        let mode_selected = MODE_PRESETS
+            .iter()
+            .position(|(_, nf)| *nf == self.no_filler)
+            .unwrap_or(usize::MAX);
+        let mode_menu = SubMenu {
+            label: "Mode".into(),
+            submenu: vec![RadioGroup {
+                selected: mode_selected,
+                select: Box::new(|t: &mut DitTray, idx: usize| {
+                    if let Some((_, nf)) = MODE_PRESETS.get(idx) {
+                        t.no_filler = *nf;
+                        let _ = t
+                            .tx
+                            .send(Control::Reconfigure(config::Reconfigure::NoFiller(*nf)));
+                    }
+                }),
+                options: MODE_PRESETS
+                    .iter()
+                    .map(|(label, _)| RadioItem {
+                        label: (*label).into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            }
+            .into()],
+            ..Default::default()
+        };
+
+        // ── Engine submenu (speech-to-text model) ──
+        let engine_selected = ENGINE_PRESETS
+            .iter()
+            .position(|(_, id)| *id == self.model)
+            .unwrap_or(usize::MAX);
+        let engine_menu = SubMenu {
+            label: "Engine".into(),
+            submenu: vec![RadioGroup {
+                selected: engine_selected,
+                select: Box::new(|t: &mut DitTray, idx: usize| {
+                    if let Some((_, id)) = ENGINE_PRESETS.get(idx) {
+                        t.model = (*id).into();
+                        let _ = t
+                            .tx
+                            .send(Control::Reconfigure(config::Reconfigure::Model((*id).into())));
+                    }
+                }),
+                options: ENGINE_PRESETS
+                    .iter()
+                    .map(|(label, _)| RadioItem {
+                        label: (*label).into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            }
+            .into()],
+            ..Default::default()
+        };
+
         let mut items: Vec<ksni::MenuItem<Self>> = vec![
             StandardItem {
                 label: "Start / stop dictation".into(),
@@ -283,6 +466,29 @@ impl ksni::Tray for DitTray {
                 ..Default::default()
             }
             .into(),
+            CheckmarkItem {
+                label: "Pause hotkey".into(),
+                checked: self.paused,
+                activate: Box::new(|t: &mut DitTray| {
+                    t.paused = !t.paused;
+                    let _ = t.tx.send(Control::SetPaused(t.paused));
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Open last transcript".into(),
+                activate: Box::new(|t: &mut DitTray| {
+                    let _ = t.tx.send(Control::OpenLastTranscript);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            device_menu.into(),
+            language_menu.into(),
+            mode_menu.into(),
+            engine_menu.into(),
             MenuItem::Separator,
         ];
         #[cfg(feature = "gui")]
@@ -321,11 +527,19 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
 
     // ksni (D-Bus) tray on the Tokio runtime, driven by session state.
     let tray_tx = tx.clone();
+    let tray_cfg = cfg.clone();
+    let devices = audio::device_names();
     rt.spawn(async move {
         use ksni::TrayMethods;
         let handle = match (DitTray {
             state: IconState::Idle,
             tx: tray_tx,
+            device: tray_cfg.device.clone(),
+            language: tray_cfg.language.clone(),
+            no_filler: tray_cfg.no_filler,
+            model: tray_cfg.model.clone(),
+            paused: false,
+            devices,
         })
         .spawn()
         .await
@@ -462,8 +676,18 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
     use std::time::{Duration, Instant};
     use tao::event::Event;
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
     use tray_icon::{Icon, TrayIconBuilder};
+
+    /// One selectable runtime-knob option in a tray submenu, paired with the
+    /// `Reconfigure` it sends and the group it belongs to (so selecting one
+    /// option clears its siblings' checkmarks — radio behaviour).
+    struct OptionItem {
+        id: MenuId,
+        group: u8,
+        reconfig: config::Reconfigure,
+        item: CheckMenuItem,
+    }
 
     let (modifiers, code) = global_hotkey_binding(&cfg.hotkey)?;
 
@@ -494,12 +718,90 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
     };
 
     let toggle_item = MenuItem::new("Start / stop dictation", true, None);
+    let pause_item = CheckMenuItem::new("Pause hotkey", true, false, None);
+    let open_item = MenuItem::new("Open last transcript", true, None);
     let quit_item = MenuItem::new("Quit dit", true, None);
     #[cfg(feature = "gui")]
     let settings_item = MenuItem::new("Settings\u{2026}", true, None);
 
+    // Build the four runtime-knob submenus (device/language/mode/engine). Each
+    // option is a checkmark; `opts` records the id→Reconfigure mapping plus the
+    // group so the event loop can enforce radio behaviour and toggle the right
+    // checkmarks.
+    let mut opts: Vec<OptionItem> = Vec::new();
+    const G_DEVICE: u8 = 0;
+    const G_LANGUAGE: u8 = 1;
+    const G_MODE: u8 = 2;
+    const G_ENGINE: u8 = 3;
+
+    let device_menu = Submenu::new("Device", true);
+    {
+        let default_item = CheckMenuItem::new("System default", true, cfg.device.is_none(), None);
+        device_menu.append(&default_item).ok();
+        opts.push(OptionItem {
+            id: default_item.id().clone(),
+            group: G_DEVICE,
+            reconfig: config::Reconfigure::Device(None),
+            item: default_item,
+        });
+        for name in audio::device_names() {
+            let checked = cfg.device.as_deref() == Some(name.as_str());
+            let item = CheckMenuItem::new(&name, true, checked, None);
+            device_menu.append(&item).ok();
+            opts.push(OptionItem {
+                id: item.id().clone(),
+                group: G_DEVICE,
+                reconfig: config::Reconfigure::Device(Some(name)),
+                item,
+            });
+        }
+    }
+
+    let language_menu = Submenu::new("Language", true);
+    for (label, code) in LANGUAGE_PRESETS {
+        let item = CheckMenuItem::new(*label, true, cfg.language == *code, None);
+        language_menu.append(&item).ok();
+        opts.push(OptionItem {
+            id: item.id().clone(),
+            group: G_LANGUAGE,
+            reconfig: config::Reconfigure::Language((*code).into()),
+            item,
+        });
+    }
+
+    let mode_menu = Submenu::new("Mode", true);
+    for (label, nf) in MODE_PRESETS {
+        let item = CheckMenuItem::new(*label, true, cfg.no_filler == *nf, None);
+        mode_menu.append(&item).ok();
+        opts.push(OptionItem {
+            id: item.id().clone(),
+            group: G_MODE,
+            reconfig: config::Reconfigure::NoFiller(*nf),
+            item,
+        });
+    }
+
+    let engine_menu = Submenu::new("Engine", true);
+    for (label, id) in ENGINE_PRESETS {
+        let item = CheckMenuItem::new(*label, true, cfg.model == *id, None);
+        engine_menu.append(&item).ok();
+        opts.push(OptionItem {
+            id: item.id().clone(),
+            group: G_ENGINE,
+            reconfig: config::Reconfigure::Model((*id).into()),
+            item,
+        });
+    }
+
     let menu = Menu::new();
     menu.append(&toggle_item).ok();
+    menu.append(&pause_item).ok();
+    menu.append(&open_item).ok();
+    menu.append(&PredefinedMenuItem::separator()).ok();
+    menu.append(&device_menu).ok();
+    menu.append(&language_menu).ok();
+    menu.append(&mode_menu).ok();
+    menu.append(&engine_menu).ok();
     menu.append(&PredefinedMenuItem::separator()).ok();
     #[cfg(feature = "gui")]
     {
@@ -510,6 +812,8 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
 
     let toggle_id = toggle_item.id().clone();
     let quit_id = quit_item.id().clone();
+    let pause_id = pause_item.id().clone();
+    let open_id = open_item.id().clone();
     #[cfg(feature = "gui")]
     let settings_id = settings_item.id().clone();
 
@@ -523,6 +827,7 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
 
     let hotkey_rx = GlobalHotKeyEvent::receiver();
     let menu_rx = MenuEvent::receiver();
+    let mut paused = false;
 
     event_loop.run(move |event, _, control_flow| {
         let _ = &hotkey_manager;
@@ -538,6 +843,20 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
                 let _ = tx.send(Control::Toggle);
             } else if ev.id == quit_id {
                 *control_flow = ControlFlow::Exit;
+            } else if ev.id == pause_id {
+                paused = !paused;
+                pause_item.set_checked(paused);
+                let _ = tx.send(Control::SetPaused(paused));
+            } else if ev.id == open_id {
+                let _ = tx.send(Control::OpenLastTranscript);
+            } else if let Some(chosen) = opts.iter().find(|o| o.id == ev.id) {
+                // Radio behaviour: check the chosen option, clear its siblings.
+                for o in &opts {
+                    if o.group == chosen.group {
+                        o.item.set_checked(o.id == ev.id);
+                    }
+                }
+                let _ = tx.send(Control::Reconfigure(chosen.reconfig.clone()));
             }
             #[cfg(feature = "gui")]
             if ev.id == settings_id {
