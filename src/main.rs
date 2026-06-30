@@ -321,7 +321,9 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
     info!("ready — press the hotkey (or use the tray) to start/stop dictation");
 
     // Hotkey via evdev (/dev/input) — works on X11 and Wayland alike.
-    if let Err(e) = linux_input::spawn_hotkey(linux_input::evdev_keycode(cfg.hotkey), tx) {
+    let spawned =
+        linux_input::resolve_hotkey(&cfg.hotkey).and_then(|hk| linux_input::spawn_hotkey(hk, tx));
+    if let Err(e) = spawned {
         error!("{e:#}");
         notify::notify("dit — hotkey unavailable", &format!("{e}"));
     }
@@ -338,9 +340,66 @@ enum UserEvent {
     SetState(IconState),
 }
 
+/// Translate a neutral [`config::Hotkey`] into the modifier mask + key code that
+/// `global-hotkey` expects, failing clearly for keys this platform can't register.
+#[cfg(not(target_os = "linux"))]
+fn global_hotkey_spec(
+    hotkey: &config::Hotkey,
+) -> Result<(
+    Option<global_hotkey::hotkey::Modifiers>,
+    global_hotkey::hotkey::Code,
+)> {
+    use config::{FunctionKey, Modifier, SidedModifier, TriggerKey};
+    use global_hotkey::hotkey::{Code, Modifiers};
+
+    let mut mods = Modifiers::empty();
+    for m in &hotkey.modifiers {
+        mods |= match m {
+            Modifier::Ctrl => Modifiers::CONTROL,
+            Modifier::Alt => Modifiers::ALT,
+            Modifier::Shift => Modifiers::SHIFT,
+            Modifier::Super => Modifiers::SUPER,
+        };
+    }
+
+    let code = match hotkey.trigger {
+        TriggerKey::Function(f) => match f {
+            FunctionKey::F1 => Code::F1,
+            FunctionKey::F2 => Code::F2,
+            FunctionKey::F3 => Code::F3,
+            FunctionKey::F4 => Code::F4,
+            FunctionKey::F5 => Code::F5,
+            FunctionKey::F6 => Code::F6,
+            FunctionKey::F7 => Code::F7,
+            FunctionKey::F8 => Code::F8,
+            FunctionKey::F9 => Code::F9,
+            FunctionKey::F10 => Code::F10,
+            FunctionKey::F11 => Code::F11,
+            FunctionKey::F12 => Code::F12,
+        },
+        TriggerKey::Modifier(s) => match s {
+            SidedModifier::LeftCtrl => Code::ControlLeft,
+            SidedModifier::RightCtrl => Code::ControlRight,
+            SidedModifier::LeftAlt => Code::AltLeft,
+            SidedModifier::RightAlt => Code::AltRight,
+            SidedModifier::LeftShift => Code::ShiftLeft,
+            SidedModifier::RightShift => Code::ShiftRight,
+            SidedModifier::LeftSuper => Code::MetaLeft,
+            SidedModifier::RightSuper => Code::MetaRight,
+        },
+        TriggerKey::Fn => anyhow::bail!(
+            "the Fn key cannot be registered as a global hotkey on this platform; \
+             bind a different key such as RightAlt or F9"
+        ),
+    };
+
+    let mods = (!mods.is_empty()).then_some(mods);
+    Ok((mods, code))
+}
+
 #[cfg(not(target_os = "linux"))]
 fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Result<()> {
-    use global_hotkey::hotkey::{Code, HotKey};
+    use global_hotkey::hotkey::HotKey;
     use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
     use std::time::{Duration, Instant};
     use tao::event::Event;
@@ -348,20 +407,7 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, TrayIconBuilder};
 
-    let code = match cfg.hotkey {
-        config::FunctionKey::F1 => Code::F1,
-        config::FunctionKey::F2 => Code::F2,
-        config::FunctionKey::F3 => Code::F3,
-        config::FunctionKey::F4 => Code::F4,
-        config::FunctionKey::F5 => Code::F5,
-        config::FunctionKey::F6 => Code::F6,
-        config::FunctionKey::F7 => Code::F7,
-        config::FunctionKey::F8 => Code::F8,
-        config::FunctionKey::F9 => Code::F9,
-        config::FunctionKey::F10 => Code::F10,
-        config::FunctionKey::F11 => Code::F11,
-        config::FunctionKey::F12 => Code::F12,
-    };
+    let (mods, code) = global_hotkey_spec(&cfg.hotkey)?;
 
     let (tx, rx) = mpsc::unbounded_channel::<Control>();
     let (state_tx, mut state_rx) = mpsc::unbounded_channel::<IconState>();
@@ -378,7 +424,7 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
     });
 
     let hotkey_manager = GlobalHotKeyManager::new()?;
-    let hotkey = HotKey::new(None, code);
+    let hotkey = HotKey::new(mods, code);
     if let Err(e) = hotkey_manager.register(hotkey) {
         tracing::warn!("could not register the hotkey: {e}");
     }
