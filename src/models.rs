@@ -12,6 +12,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::config::ModelsAction;
 
+#[derive(Debug)]
 struct ModelEntry {
     id: &'static str,
     description: &'static str,
