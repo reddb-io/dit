@@ -64,7 +64,7 @@ async fn session_inner(
         }
     };
 
-    let engine = ScribeEngine::default();
+    let engine = ScribeEngine;
     engine
         .run_stream(
             &cfg,

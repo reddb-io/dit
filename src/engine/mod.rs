@@ -29,6 +29,7 @@ pub trait Transcriber: Send + Sync {
     /// then drain buffered frames, flush a final commit, and close. Committed
     /// segments are typed via `injector`. When the stop signal fires the engine
     /// sets `audio_stop` to signal the capture thread to halt.
+    #[allow(clippy::too_many_arguments)]
     async fn run_stream(
         &self,
         cfg: &Config,
@@ -42,5 +43,6 @@ pub trait Transcriber: Send + Sync {
 
     /// Transcribe a complete PCM-16 mono 16 kHz buffer and return the full
     /// transcript. Intended for batch/local-file transcription paths.
+    #[expect(dead_code)]
     async fn transcribe_batch(&self, pcm: Vec<i16>, language: &str) -> Result<String>;
 }
