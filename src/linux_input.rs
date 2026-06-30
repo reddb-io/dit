@@ -22,7 +22,7 @@ use evdev::{uinput::VirtualDevice, AttributeSet, EventType, KeyCode, KeyEvent};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
 
-use crate::config::FunctionKey;
+use crate::config::{FunctionKey, Hotkey, Modifier, SidedModifier, TriggerKey};
 use crate::inject::InjectMsg;
 use crate::Control;
 
@@ -44,8 +44,18 @@ impl HotkeyDebouncer {
     }
 }
 
-/// Map our neutral hotkey to an evdev key code.
-pub fn evdev_keycode(key: FunctionKey) -> KeyCode {
+/// A [`Hotkey`] resolved to raw evdev key codes, ready for the reader threads.
+#[derive(Debug)]
+pub struct ResolvedHotkey {
+    /// The key whose press fires the toggle.
+    trigger: u16,
+    /// Each required modifier as the set of evdev codes (left/right) that satisfy
+    /// it. A modifier counts as held when any of its codes is down.
+    modifiers: Vec<Vec<u16>>,
+}
+
+/// Map a function key to its evdev code.
+fn function_keycode(key: FunctionKey) -> KeyCode {
     use FunctionKey::*;
     match key {
         F1 => KeyCode::KEY_F1,
@@ -63,17 +73,67 @@ pub fn evdev_keycode(key: FunctionKey) -> KeyCode {
     }
 }
 
+/// Map a single sided modifier key to its evdev code.
+fn sided_keycode(key: SidedModifier) -> KeyCode {
+    use SidedModifier::*;
+    match key {
+        LeftCtrl => KeyCode::KEY_LEFTCTRL,
+        RightCtrl => KeyCode::KEY_RIGHTCTRL,
+        LeftAlt => KeyCode::KEY_LEFTALT,
+        RightAlt => KeyCode::KEY_RIGHTALT,
+        LeftShift => KeyCode::KEY_LEFTSHIFT,
+        RightShift => KeyCode::KEY_RIGHTSHIFT,
+        LeftSuper => KeyCode::KEY_LEFTMETA,
+        RightSuper => KeyCode::KEY_RIGHTMETA,
+    }
+}
+
+/// The evdev codes (left and right) that satisfy a side-agnostic modifier.
+fn modifier_codes(m: Modifier) -> Vec<u16> {
+    use Modifier::*;
+    let pair = match m {
+        Ctrl => [KeyCode::KEY_LEFTCTRL, KeyCode::KEY_RIGHTCTRL],
+        Alt => [KeyCode::KEY_LEFTALT, KeyCode::KEY_RIGHTALT],
+        Shift => [KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_RIGHTSHIFT],
+        Super => [KeyCode::KEY_LEFTMETA, KeyCode::KEY_RIGHTMETA],
+    };
+    pair.iter().map(|k| k.code()).collect()
+}
+
+/// Resolve a neutral [`Hotkey`] into raw evdev codes, or fail with a clear
+/// message for keys evdev cannot capture on Linux.
+pub fn resolve_hotkey(hotkey: &Hotkey) -> Result<ResolvedHotkey> {
+    let trigger = match hotkey.trigger {
+        TriggerKey::Function(f) => function_keycode(f).code(),
+        TriggerKey::Modifier(m) => sided_keycode(m).code(),
+        TriggerKey::Fn => bail!(
+            "the Fn key cannot be captured via evdev on Linux (it is handled in \
+             keyboard firmware, below /dev/input); bind a different key such as \
+             RightAlt or F9"
+        ),
+    };
+    let modifiers = hotkey.modifiers.iter().copied().map(modifier_codes).collect();
+    Ok(ResolvedHotkey { trigger, modifiers })
+}
+
+/// Whether every required modifier is currently held (any of its codes down).
+fn modifiers_held(held: &HashSet<u16>, modifiers: &[Vec<u16>]) -> bool {
+    modifiers
+        .iter()
+        .all(|codes| codes.iter().any(|c| held.contains(c)))
+}
+
 /// Spawn one reader thread per keyboard; each forwards a press of `target` as a
 /// toggle. Autorepeat (value 2) and release (value 0) are ignored.
 ///
 /// The device set is re-scanned forever so USB/Bluetooth keyboards that appear
 /// after `dit` starts are picked up automatically. Dead readers unregister their
 /// path so the monitor can attach again if the kernel reuses the event node.
-pub fn spawn_hotkey(target: KeyCode, tx: UnboundedSender<Control>) -> Result<()> {
-    let target_code = target.code();
+pub fn spawn_hotkey(hotkey: ResolvedHotkey, tx: UnboundedSender<Control>) -> Result<()> {
+    let hotkey = Arc::new(hotkey);
     let active = Arc::new(Mutex::new(HashSet::<PathBuf>::new()));
     let debouncer = Arc::new(HotkeyDebouncer::default());
-    let found = scan_keyboards(target_code, &tx, &active, &debouncer);
+    let found = scan_keyboards(&hotkey, &tx, &active, &debouncer);
 
     if found == 0 && !Path::new("/dev/input").exists() {
         bail!(
@@ -89,7 +149,7 @@ pub fn spawn_hotkey(target: KeyCode, tx: UnboundedSender<Control>) -> Result<()>
 
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(2));
-        let newly_found = scan_keyboards(target_code, &tx, &active, &debouncer);
+        let newly_found = scan_keyboards(&hotkey, &tx, &active, &debouncer);
         if newly_found > 0 {
             info!("attached hotkey listener to {newly_found} new keyboard(s)");
         }
@@ -98,14 +158,14 @@ pub fn spawn_hotkey(target: KeyCode, tx: UnboundedSender<Control>) -> Result<()>
 }
 
 fn scan_keyboards(
-    target_code: u16,
+    hotkey: &Arc<ResolvedHotkey>,
     tx: &UnboundedSender<Control>,
     active: &Arc<Mutex<HashSet<PathBuf>>>,
     debouncer: &Arc<HotkeyDebouncer>,
 ) -> usize {
     let mut found = 0;
     for (path, dev) in evdev::enumerate() {
-        if !is_hotkey_keyboard(&dev, target_code) {
+        if !is_hotkey_keyboard(&dev, hotkey.trigger) {
             continue;
         }
         {
@@ -115,12 +175,11 @@ fn scan_keyboards(
             }
         }
         found += 1;
+        let hotkey = hotkey.clone();
         let tx = tx.clone();
         let active = active.clone();
         let debouncer = debouncer.clone();
-        std::thread::spawn(move || {
-            run_keyboard_reader(path, dev, target_code, tx, active, debouncer)
-        });
+        std::thread::spawn(move || run_keyboard_reader(path, dev, hotkey, tx, active, debouncer));
     }
     found
 }
@@ -137,20 +196,35 @@ fn is_hotkey_keyboard(dev: &evdev::Device, target_code: u16) -> bool {
 fn run_keyboard_reader(
     path: PathBuf,
     mut dev: evdev::Device,
-    target_code: u16,
+    hotkey: Arc<ResolvedHotkey>,
     tx: UnboundedSender<Control>,
     active: Arc<Mutex<HashSet<PathBuf>>>,
     debouncer: Arc<HotkeyDebouncer>,
 ) {
     let name = dev.name().unwrap_or("<unknown>").to_string();
     info!("hotkey listener attached to {} ({name})", path.display());
+    // Track which keys are currently held so combos (Ctrl+Shift+F9) only fire
+    // when every required modifier is down at the moment the trigger is pressed.
+    let mut held = HashSet::<u16>::new();
     loop {
         match dev.fetch_events() {
             Ok(events) => {
                 for ev in events {
-                    if ev.event_type() == EventType::KEY
-                        && ev.code() == target_code
+                    if ev.event_type() != EventType::KEY {
+                        continue;
+                    }
+                    match ev.value() {
+                        1 => {
+                            held.insert(ev.code());
+                        }
+                        0 => {
+                            held.remove(&ev.code());
+                        }
+                        _ => {}
+                    }
+                    if ev.code() == hotkey.trigger
                         && ev.value() == 1
+                        && modifiers_held(&held, &hotkey.modifiers)
                     {
                         if debouncer.should_fire(Instant::now()) {
                             let _ = tx.send(Control::Toggle);
@@ -285,6 +359,54 @@ impl Paster {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_function_keys_and_modifier_keys() {
+        // A plain function key: trigger code, no modifiers.
+        let f9 = resolve_hotkey(&Hotkey {
+            modifiers: vec![],
+            trigger: TriggerKey::Function(FunctionKey::F9),
+        })
+        .unwrap();
+        assert_eq!(f9.trigger, KeyCode::KEY_F9.code());
+        assert!(f9.modifiers.is_empty());
+
+        // A lone modifier key (Right Alt) becomes the trigger.
+        let ralt = resolve_hotkey(&Hotkey {
+            modifiers: vec![],
+            trigger: TriggerKey::Modifier(SidedModifier::RightAlt),
+        })
+        .unwrap();
+        assert_eq!(ralt.trigger, KeyCode::KEY_RIGHTALT.code());
+    }
+
+    #[test]
+    fn fn_key_is_rejected_with_a_clear_error() {
+        let err = resolve_hotkey(&Hotkey {
+            modifiers: vec![],
+            trigger: TriggerKey::Fn,
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("Fn"), "error should mention the Fn key: {err}");
+    }
+
+    #[test]
+    fn combo_only_fires_when_all_modifiers_are_held() {
+        let combo = resolve_hotkey(&Hotkey {
+            modifiers: vec![Modifier::Ctrl, Modifier::Shift],
+            trigger: TriggerKey::Function(FunctionKey::F9),
+        })
+        .unwrap();
+
+        let mut held = HashSet::new();
+        assert!(!modifiers_held(&held, &combo.modifiers));
+        held.insert(KeyCode::KEY_LEFTCTRL.code());
+        assert!(!modifiers_held(&held, &combo.modifiers));
+        // Either side satisfies a modifier: right shift counts for Shift.
+        held.insert(KeyCode::KEY_RIGHTSHIFT.code());
+        assert!(modifiers_held(&held, &combo.modifiers));
+    }
 
     #[test]
     fn hotkey_debouncer_suppresses_duplicate_events_in_window() {
