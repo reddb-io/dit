@@ -50,8 +50,20 @@ lto = true
 strip = true
 
 # Linux: fully self-contained — pure-Rust input (evdev hotkey + /dev/uinput
-# paste), clipboard (arboard: x11rb + wl-clipboard-rs, no C libs) and a D-Bus
-# tray (ksni, no GTK). No external apt packages beyond the universal libasound.
+# paste), clipboard (arboard) and a D-Bus tray (ksni, no GTK). No external apt
+# packages beyond the universal libasound.
+#
+# arboard is intentionally pulled WITHOUT the `wayland-data-control` feature
+# (issue #18, option A). That feature would give native Wayland clipboard
+# access on wlroots compositors (sway/Hyprland/river/niri), but it pulls
+# `wl-clipboard-rs` → a runtime `libwayland-client.so` dependency, eroding the
+# "self-contained, only libasound2" Linux promise — and it does NOT help GNOME
+# (Mutter exposes no `wlr-data-control`, so arboard falls back to X11 there
+# anyway). We instead mitigate the Wayland image-paste race in code: a verified
+# clipboard re-set with a longer settle (mitigation B) and an opt-in `--type`
+# path that bypasses the clipboard for typeable text (mitigation C), both in
+# src/linux_input.rs. Enabling option A is a deliberate footprint trade-off to
+# be made explicitly, not silently.
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13.2"
 ksni = "0.3.4"

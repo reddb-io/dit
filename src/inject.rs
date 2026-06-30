@@ -21,17 +21,21 @@ pub struct Injector {
 }
 
 impl Injector {
-    /// Spawn the injector thread. `paste_shift` only affects Linux (Ctrl+Shift+V
-    /// instead of Ctrl+V, for terminals).
-    pub fn spawn(paste_shift: bool) -> Result<Self> {
+    /// Spawn the injector thread. `paste_shift` and `type_hybrid` only affect
+    /// Linux: `paste_shift` uses Ctrl+Shift+V instead of Ctrl+V (for terminals),
+    /// and `type_hybrid` opts into typing the text via uinput with a clipboard
+    /// fallback instead of pasting (issue #18). macOS/Windows always type via
+    /// enigo, so both flags are ignored there.
+    pub fn spawn(paste_shift: bool, type_hybrid: bool) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<InjectMsg>();
 
         #[cfg(target_os = "linux")]
-        std::thread::spawn(move || crate::linux_input::run_injector(rx, paste_shift));
+        std::thread::spawn(move || crate::linux_input::run_injector(rx, paste_shift, type_hybrid));
 
         #[cfg(not(target_os = "linux"))]
         {
             let _ = paste_shift;
+            let _ = type_hybrid;
             std::thread::spawn(move || run_enigo(rx));
         }
 

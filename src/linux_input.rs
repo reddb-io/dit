@@ -286,8 +286,14 @@ fn run_keyboard_reader(
 }
 
 /// Drive the injector backend on a dedicated thread (called from `inject.rs`).
-pub fn run_injector(rx: Receiver<InjectMsg>, shift: bool) {
-    let mut paster = match Paster::new(shift) {
+///
+/// `shift` selects Ctrl+Shift+V over Ctrl+V for the clipboard paste chord.
+/// `type_hybrid` opts into the typing-first delivery path: characters the
+/// active layout can produce are injected as keystrokes via `/dev/uinput`, and
+/// only the characters it can't type (accents/symbols/emoji) fall back to the
+/// clipboard — so most deliveries never touch the clipboard at all.
+pub fn run_injector(rx: Receiver<InjectMsg>, shift: bool, type_hybrid: bool) {
+    let mut paster = match Paster::new(shift, type_hybrid) {
         Ok(p) => p,
         Err(e) => {
             error!("{e:#}");
@@ -296,38 +302,62 @@ pub fn run_injector(rx: Receiver<InjectMsg>, shift: bool) {
     };
     while let Ok(InjectMsg::Type(text)) = rx.recv() {
         let chars = text.chars().count();
-        info!(
-            "delivery started: clipboard + {} paste chord ({chars} chars)",
-            if shift { "Ctrl+Shift+V" } else { "Ctrl+V" }
-        );
-        if let Err(e) = paster.paste(&text) {
-            error!("delivery failed: clipboard/uinput paste failed ({chars} chars): {e:#}");
+        let mode = if type_hybrid {
+            "typing (uinput, clipboard fallback)"
+        } else if shift {
+            "clipboard + Ctrl+Shift+V paste chord"
         } else {
-            debug!("pasted: {text}");
-            info!(
-                "delivery emitted: clipboard set and {} paste chord sent ({chars} chars)",
-                if shift { "Ctrl+Shift+V" } else { "Ctrl+V" }
-            );
+            "clipboard + Ctrl+V paste chord"
+        };
+        info!("delivery started: {mode} ({chars} chars)");
+        if let Err(e) = paster.deliver(&text) {
+            error!("delivery failed: {mode} failed ({chars} chars): {e:#}");
+        } else {
+            debug!("delivered: {text}");
+            info!("delivery emitted: {mode} ({chars} chars)");
         }
     }
 }
 
-/// Clipboard (arboard) + a `/dev/uinput` virtual keyboard that emits the paste
-/// chord. Held for the program's lifetime so the clipboard keeps serving.
+/// How long to let the compositor's X11↔Wayland clipboard bridge settle after a
+/// `set_text` before reading it back (mitigation B). The previous 40 ms was too
+/// short for Mutter's bridge on GNOME/Wayland — when a native image was the last
+/// clipboard owner, the `image/*` target could still be live when the receiving
+/// app reads, so the transcript was attached as an image. A longer settle plus a
+/// verified re-set shrinks that race window.
+const CLIPBOARD_SETTLE: Duration = Duration::from_millis(120);
+/// How many times to set + verify the clipboard before giving up and emitting
+/// the paste chord anyway (mitigation B).
+const CLIPBOARD_SET_ATTEMPTS: usize = 3;
+
+/// Clipboard (arboard) + a `/dev/uinput` virtual keyboard. Depending on the
+/// delivery mode it either pastes through the clipboard (default) or types the
+/// text directly, falling back to the clipboard only for characters the layout
+/// can't produce. Held for the program's lifetime so the clipboard keeps serving.
 struct Paster {
     device: VirtualDevice,
     clipboard: arboard::Clipboard,
     shift: bool,
+    /// When true, deliver by typing (uinput) with a clipboard fallback for
+    /// characters the active layout can't type; otherwise paste via clipboard.
+    type_hybrid: bool,
 }
 
 impl Paster {
-    fn new(shift: bool) -> Result<Self> {
+    fn new(shift: bool, type_hybrid: bool) -> Result<Self> {
         let clipboard = arboard::Clipboard::new().context("clipboard unavailable")?;
 
         let mut keys = AttributeSet::<KeyCode>::new();
         keys.insert(KeyCode::KEY_LEFTCTRL);
         keys.insert(KeyCode::KEY_LEFTSHIFT);
         keys.insert(KeyCode::KEY_V);
+        // The typing path can emit any key the layout map produces, so the
+        // virtual device must advertise all of them up front.
+        if type_hybrid {
+            for key in typing_keycodes() {
+                keys.insert(key);
+            }
+        }
         let device = VirtualDevice::builder()
             .context(
                 "cannot open /dev/uinput — grant write access:\n  \
@@ -346,26 +376,128 @@ impl Paster {
             device,
             clipboard,
             shift,
+            type_hybrid,
         })
     }
 
-    fn paste(&mut self, text: &str) -> Result<()> {
-        self.clipboard
-            .set_text(text.to_string())
-            .context("could not set the clipboard")?;
-        match self.clipboard.get_text() {
-            Ok(current) if current == text => {
-                info!("delivery checkpoint: clipboard readback matched")
-            }
-            Ok(current) => warn!(
-                "delivery checkpoint: clipboard readback mismatch (wanted {} bytes, got {} bytes)",
-                text.len(),
-                current.len()
-            ),
-            Err(e) => warn!("delivery checkpoint: clipboard readback failed: {e}"),
+    /// Deliver `text` using the configured mode.
+    fn deliver(&mut self, text: &str) -> Result<()> {
+        if self.type_hybrid {
+            self.deliver_typed(text)
+        } else {
+            self.paste(text)
         }
-        std::thread::sleep(Duration::from_millis(40));
+    }
+
+    /// Default path: set the clipboard (verified, with a settle to let the
+    /// X11↔Wayland bridge sync) and emit the paste chord. Mitigation B.
+    fn paste(&mut self, text: &str) -> Result<()> {
+        self.set_clipboard_verified(text)?;
         self.emit_paste()
+    }
+
+    /// Hybrid typing path (mitigation C). Walk the text in runs: type the runs
+    /// the layout can produce as keystrokes, and only for runs of characters it
+    /// can't type (accents/symbols/emoji) fall back to the clipboard. When the
+    /// whole text is typeable the clipboard is never touched — so it is not
+    /// clobbered and the Wayland image-paste bug cannot occur.
+    fn deliver_typed(&mut self, text: &str) -> Result<()> {
+        let segments = plan_segments(text);
+        let needs_clipboard = segments.iter().any(|s| matches!(s, Segment::Paste(_)));
+        // Best-effort: only when a fallback is unavoidable do we save the user's
+        // clipboard so we can restore it afterwards.
+        let saved = if needs_clipboard {
+            self.clipboard.get_text().ok()
+        } else {
+            None
+        };
+
+        for segment in segments {
+            match segment {
+                Segment::Type(run) => {
+                    for c in run.chars() {
+                        let (key, shift) =
+                            char_to_key(c).expect("planner only emits typeable chars in Type runs");
+                        self.emit_char(key, shift)?;
+                    }
+                }
+                Segment::Paste(run) => {
+                    info!(
+                        "delivery checkpoint: clipboard fallback for {} untypeable char(s)",
+                        run.chars().count()
+                    );
+                    self.set_clipboard_verified(&run)?;
+                    self.emit_paste()?;
+                    // Let the target consume the paste before we touch the
+                    // clipboard again (next fallback or restore).
+                    std::thread::sleep(CLIPBOARD_SETTLE);
+                }
+            }
+        }
+
+        // Restore whatever the user had, so the typing path never permanently
+        // clobbers the clipboard.
+        if let Some(prev) = saved {
+            if let Err(e) = self.clipboard.set_text(prev) {
+                warn!("delivery checkpoint: could not restore clipboard after fallback: {e}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Set the clipboard to `text` and verify the readback, retrying a few times
+    /// with a settle in between to give the compositor's X11↔Wayland bridge time
+    /// to converge before we emit the chord (mitigation B).
+    fn set_clipboard_verified(&mut self, text: &str) -> Result<()> {
+        for attempt in 1..=CLIPBOARD_SET_ATTEMPTS {
+            self.clipboard
+                .set_text(text.to_string())
+                .context("could not set the clipboard")?;
+            // Let Mutter's X11→Wayland bridge sync before reading back.
+            std::thread::sleep(CLIPBOARD_SETTLE);
+            match self.clipboard.get_text() {
+                Ok(current) if current == text => {
+                    info!("delivery checkpoint: clipboard readback matched (attempt {attempt})");
+                    return Ok(());
+                }
+                Ok(current) => warn!(
+                    "delivery checkpoint: clipboard readback mismatch on attempt {attempt} \
+                     (wanted {} bytes, got {} bytes); re-setting",
+                    text.len(),
+                    current.len()
+                ),
+                Err(e) => warn!(
+                    "delivery checkpoint: clipboard readback failed on attempt {attempt}: {e}; \
+                     re-setting"
+                ),
+            }
+        }
+        warn!(
+            "delivery checkpoint: clipboard still unverified after {CLIPBOARD_SET_ATTEMPTS} \
+             attempts; emitting paste anyway"
+        );
+        Ok(())
+    }
+
+    /// Type a single character: hold Shift if the layout needs it, tap the key,
+    /// release. Small inter-event sleeps keep fast TUIs from dropping events.
+    fn emit_char(&mut self, key: KeyCode, shift: bool) -> Result<()> {
+        let mut down = Vec::with_capacity(2);
+        if shift {
+            down.push(*KeyEvent::new(KeyCode::KEY_LEFTSHIFT, 1));
+        }
+        down.push(*KeyEvent::new(key, 1));
+        self.device.emit(&down)?;
+        std::thread::sleep(Duration::from_millis(2));
+
+        let mut up = Vec::with_capacity(2);
+        up.push(*KeyEvent::new(key, 0));
+        if shift {
+            up.push(*KeyEvent::new(KeyCode::KEY_LEFTSHIFT, 0));
+        }
+        self.device.emit(&up)?;
+        std::thread::sleep(Duration::from_millis(1));
+        Ok(())
     }
 
     fn emit_paste(&mut self) -> Result<()> {
@@ -390,6 +522,126 @@ impl Paster {
         self.device.emit(&up)?;
         Ok(())
     }
+}
+
+// ── Hybrid typing: layout map + delivery planning (mitigation C) ─────────────
+//
+// The clipboard path is Unicode/layout-proof but rides the clipboard, which is
+// exactly what triggers the Wayland image-paste bug. The typing path injects
+// characters directly through `/dev/uinput`. uinput speaks *keycodes*, not
+// characters, so the mapping below assumes a US/ASCII layout — the common case,
+// and the one whose symbols line up with `evdev`'s key names. Anything the map
+// can't produce (accents like `ç`/`ã`/`é`, other scripts, emoji) returns `None`
+// and rides the clipboard fallback, so Portuguese dictation never loses an
+// accent even though the bulk of the text avoids the clipboard entirely.
+
+/// One contiguous run of the transcript, tagged by how it will be delivered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Segment {
+    /// Characters the layout can type directly as keystrokes.
+    Type(String),
+    /// Characters the layout can't type; delivered via the clipboard fallback.
+    Paste(String),
+}
+
+/// Split `text` into alternating typeable / untypeable runs, preserving order.
+/// Consecutive characters of the same kind are coalesced so the typing path
+/// emits as few clipboard fallbacks as possible.
+fn plan_segments(text: &str) -> Vec<Segment> {
+    let mut segments: Vec<Segment> = Vec::new();
+    for c in text.chars() {
+        let typeable = char_to_key(c).is_some();
+        match segments.last_mut() {
+            Some(Segment::Type(run)) if typeable => run.push(c),
+            Some(Segment::Paste(run)) if !typeable => run.push(c),
+            _ => segments.push(if typeable {
+                Segment::Type(c.to_string())
+            } else {
+                Segment::Paste(c.to_string())
+            }),
+        }
+    }
+    segments
+}
+
+/// Map a character to the key (and whether Shift is held) that produces it on a
+/// US/ASCII layout, or `None` if the layout can't type it. `None` characters
+/// ride the clipboard fallback.
+fn char_to_key(c: char) -> Option<(KeyCode, bool)> {
+    use KeyCode as K;
+    let unshifted = |k: KeyCode| Some((k, false));
+    let shifted = |k: KeyCode| Some((k, true));
+    Some(match c {
+        'a'..='z' => return unshifted(letter_keycode(c.to_ascii_uppercase()).ok()?),
+        'A'..='Z' => return shifted(letter_keycode(c).ok()?),
+        ' ' => (K::KEY_SPACE, false),
+        '\n' => (K::KEY_ENTER, false),
+        '\t' => (K::KEY_TAB, false),
+        '1' => (K::KEY_1, false),
+        '2' => (K::KEY_2, false),
+        '3' => (K::KEY_3, false),
+        '4' => (K::KEY_4, false),
+        '5' => (K::KEY_5, false),
+        '6' => (K::KEY_6, false),
+        '7' => (K::KEY_7, false),
+        '8' => (K::KEY_8, false),
+        '9' => (K::KEY_9, false),
+        '0' => (K::KEY_0, false),
+        '!' => (K::KEY_1, true),
+        '@' => (K::KEY_2, true),
+        '#' => (K::KEY_3, true),
+        '$' => (K::KEY_4, true),
+        '%' => (K::KEY_5, true),
+        '^' => (K::KEY_6, true),
+        '&' => (K::KEY_7, true),
+        '*' => (K::KEY_8, true),
+        '(' => (K::KEY_9, true),
+        ')' => (K::KEY_0, true),
+        '-' => (K::KEY_MINUS, false),
+        '_' => (K::KEY_MINUS, true),
+        '=' => (K::KEY_EQUAL, false),
+        '+' => (K::KEY_EQUAL, true),
+        '[' => (K::KEY_LEFTBRACE, false),
+        '{' => (K::KEY_LEFTBRACE, true),
+        ']' => (K::KEY_RIGHTBRACE, false),
+        '}' => (K::KEY_RIGHTBRACE, true),
+        '\\' => (K::KEY_BACKSLASH, false),
+        '|' => (K::KEY_BACKSLASH, true),
+        ';' => (K::KEY_SEMICOLON, false),
+        ':' => (K::KEY_SEMICOLON, true),
+        '\'' => (K::KEY_APOSTROPHE, false),
+        '"' => (K::KEY_APOSTROPHE, true),
+        '`' => (K::KEY_GRAVE, false),
+        '~' => (K::KEY_GRAVE, true),
+        ',' => (K::KEY_COMMA, false),
+        '<' => (K::KEY_COMMA, true),
+        '.' => (K::KEY_DOT, false),
+        '>' => (K::KEY_DOT, true),
+        '/' => (K::KEY_SLASH, false),
+        '?' => (K::KEY_SLASH, true),
+        _ => return None,
+    })
+}
+
+/// Every key the layout map can emit, so [`Paster::new`] can advertise them on
+/// the virtual device. Derived by probing the map over the printable ASCII
+/// range plus the whitespace keys it supports.
+fn typing_keycodes() -> Vec<KeyCode> {
+    let mut keys: Vec<KeyCode> = Vec::new();
+    let mut push = |k: KeyCode| {
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    };
+    push(KeyCode::KEY_LEFTSHIFT);
+    for byte in 0x20u8..=0x7e {
+        if let Some((k, _)) = char_to_key(byte as char) {
+            push(k);
+        }
+    }
+    push(KeyCode::KEY_ENTER);
+    push(KeyCode::KEY_TAB);
+    keys
 }
 
 #[cfg(test)]
@@ -451,6 +703,72 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("Fn"), "error should name the Fn key: {err}");
+    }
+
+    #[test]
+    fn char_to_key_maps_ascii_and_rejects_unicode() {
+        // Lower/upper letters share a key; case is the Shift bit.
+        assert_eq!(char_to_key('a'), Some((KeyCode::KEY_A, false)));
+        assert_eq!(char_to_key('A'), Some((KeyCode::KEY_A, true)));
+        // Digits unshifted, their row symbols shifted on the same key.
+        assert_eq!(char_to_key('1'), Some((KeyCode::KEY_1, false)));
+        assert_eq!(char_to_key('!'), Some((KeyCode::KEY_1, true)));
+        // Whitespace the layout can type.
+        assert_eq!(char_to_key(' '), Some((KeyCode::KEY_SPACE, false)));
+        assert_eq!(char_to_key('\n'), Some((KeyCode::KEY_ENTER, false)));
+        // Portuguese accents and emoji are not typeable → clipboard fallback.
+        assert_eq!(char_to_key('ç'), None);
+        assert_eq!(char_to_key('ã'), None);
+        assert_eq!(char_to_key('é'), None);
+        assert_eq!(char_to_key('🙂'), None);
+    }
+
+    #[test]
+    fn plan_segments_splits_typeable_from_fallback_runs() {
+        // Pure ASCII never needs the clipboard.
+        assert_eq!(
+            plan_segments("ok let's go"),
+            vec![Segment::Type("ok let's go".to_string())]
+        );
+        // Accents coalesce into one Paste run; the ASCII around them is typed:
+        // "informa" typed, "çã" pasted, "o" typed.
+        assert_eq!(
+            plan_segments("informação"),
+            vec![
+                Segment::Type("informa".to_string()),
+                Segment::Paste("çã".to_string()),
+                Segment::Type("o".to_string()),
+            ]
+        );
+        // Empty text yields no work.
+        assert!(plan_segments("").is_empty());
+    }
+
+    #[test]
+    fn fully_typeable_text_needs_no_clipboard() {
+        // The headline property: typeable transcripts never touch the clipboard,
+        // so they can't trigger the Wayland image-paste bug nor clobber it.
+        let segments = plan_segments("the quick brown fox: jumps! (123)");
+        assert!(segments.iter().all(|s| matches!(s, Segment::Type(_))));
+    }
+
+    #[test]
+    fn typing_keycodes_advertises_the_keys_the_map_emits() {
+        let keys = typing_keycodes();
+        // A sampling of keys the map can produce must be advertised.
+        for k in [
+            KeyCode::KEY_A,
+            KeyCode::KEY_Z,
+            KeyCode::KEY_1,
+            KeyCode::KEY_SPACE,
+            KeyCode::KEY_MINUS,
+            KeyCode::KEY_SLASH,
+            KeyCode::KEY_LEFTSHIFT,
+            KeyCode::KEY_ENTER,
+            KeyCode::KEY_TAB,
+        ] {
+            assert!(keys.contains(&k), "missing {k:?} from typing keyset");
+        }
     }
 
     #[test]

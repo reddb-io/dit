@@ -153,7 +153,7 @@ fn main() -> Result<()> {
     }
 
     let cfg = Config::resolve(&cli, &matches)?;
-    let injector = Injector::spawn(cfg.paste_shift)?;
+    let injector = Injector::spawn(cfg.paste_shift, cfg.type_hybrid)?;
 
     // Background Tokio runtime for audio + the WebSocket. Kept alive for the
     // whole program (the UI below never returns).
