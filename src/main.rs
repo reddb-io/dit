@@ -365,7 +365,9 @@ fn global_hotkey_binding(
             Modifier::Ctrl => Modifiers::CONTROL,
             Modifier::Alt => Modifiers::ALT,
             Modifier::Shift => Modifiers::SHIFT,
-            Modifier::Meta => Modifiers::META,
+            // global-hotkey only honours ALT/SHIFT/CONTROL/SUPER; SUPER is the
+            // Cmd/Win/Meta key on every platform.
+            Modifier::Meta => Modifiers::SUPER,
         };
     }
 
