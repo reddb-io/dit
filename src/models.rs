@@ -17,10 +17,12 @@ struct ModelEntry {
     id: &'static str,
     description: &'static str,
     hf_url: &'static str,
+    /// SHA-256 hex of the downloaded file. Empty string = skip verification.
     sha256: &'static str,
 }
 
 static CATALOG: &[ModelEntry] = &[
+    // ── Cloud engine models (ggml format, for reference / future use) ─────────
     ModelEntry {
         id: "whisper-tiny",
         description: "Whisper tiny (ggml, ~75 MB) — fastest, lowest accuracy",
@@ -39,6 +41,19 @@ static CATALOG: &[ModelEntry] = &[
         hf_url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
         sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
     },
+    // ── Local engine models (GGUF, for --engine local via candle) ─────────────
+    ModelEntry {
+        id: "whisper-tiny-local",
+        description: "Whisper tiny (GGUF quantized, ~40 MB) — fastest offline, for --engine local",
+        hf_url: "https://huggingface.co/lmz/candle-whisper/resolve/main/pytorch_model_whisper-tiny.gguf",
+        sha256: "",
+    },
+    ModelEntry {
+        id: "whisper-base-local",
+        description: "Whisper base (GGUF quantized, ~75 MB) — offline, for --engine local",
+        hf_url: "https://huggingface.co/lmz/candle-whisper/resolve/main/pytorch_model_whisper-base.gguf",
+        sha256: "",
+    },
 ];
 
 /// Directory where all downloaded models live: `~/.dit/models/`.
@@ -50,7 +65,6 @@ pub fn models_dir() -> PathBuf {
 }
 
 /// Resolve a model id to its local file path; returns `None` when not on disk.
-/// Used by the transcription layer to select a local model via `--model <id>`.
 #[allow(dead_code)]
 pub fn resolve_model(name: &str) -> Option<PathBuf> {
     let entry = CATALOG.iter().find(|m| m.id == name)?;
@@ -60,6 +74,12 @@ pub fn resolve_model(name: &str) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+/// Resolve a local-engine model to its on-disk path.
+/// Returns `None` when the model has not been downloaded yet.
+pub fn resolve_local_model(name: &str) -> Option<PathBuf> {
+    resolve_model(name)
 }
 
 fn model_path(entry: &ModelEntry) -> PathBuf {
@@ -92,6 +112,10 @@ pub fn run(action: &ModelsAction) -> Result<()> {
             let path = model_path(entry);
 
             if path.exists() {
+                if entry.sha256.is_empty() {
+                    println!("✓ {} is already downloaded (no checksum to verify)", entry.id);
+                    return Ok(());
+                }
                 let existing = sha256_file(&path)?;
                 if existing == entry.sha256 {
                     println!("✓ {} is already downloaded and current", entry.id);
@@ -104,13 +128,15 @@ pub fn run(action: &ModelsAction) -> Result<()> {
             let bytes = http_get_bytes(entry.hf_url)
                 .with_context(|| format!("downloading {}", entry.hf_url))?;
 
-            let actual = sha256_bytes(&bytes);
-            if actual != entry.sha256 {
-                bail!(
-                    "checksum mismatch — refusing to save (expected {}, got {})",
-                    entry.sha256,
-                    actual
-                );
+            if !entry.sha256.is_empty() {
+                let actual = sha256_bytes(&bytes);
+                if actual != entry.sha256 {
+                    bail!(
+                        "checksum mismatch — refusing to save (expected {}, got {})",
+                        entry.sha256,
+                        actual
+                    );
+                }
             }
 
             std::fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
