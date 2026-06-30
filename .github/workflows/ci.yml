@@ -53,5 +53,9 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Build (local engine)
+        if: runner.os == 'Linux'
+        run: cargo build --release --features local
+
       - name: Test
         run: cargo test --release
