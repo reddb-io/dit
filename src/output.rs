@@ -112,6 +112,59 @@ impl SessionLog {
     }
 }
 
+/// Find the most recent session log file under `dir`, by the millisecond stamp
+/// embedded in its `session-<ms>.txt` name (newest wins). Returns `None` when
+/// the directory is missing or holds no parseable session files.
+fn newest_session_in(dir: &Path) -> Option<std::path::PathBuf> {
+    fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name();
+            let s = name.to_string_lossy();
+            let ms = s
+                .strip_prefix("session-")?
+                .strip_suffix(".txt")?
+                .parse::<u128>()
+                .ok()?;
+            Some((ms, e.path()))
+        })
+        .max_by_key(|(ms, _)| *ms)
+        .map(|(_, path)| path)
+}
+
+/// Path to the most recent session transcript under `~/.dit/sessions/`.
+pub fn last_session_path() -> Option<std::path::PathBuf> {
+    let dir = dirs::home_dir()?.join(".dit").join("sessions");
+    newest_session_in(&dir)
+}
+
+/// Open the most recent session transcript in the platform's default handler.
+/// Best-effort: logs a debug line and returns when there is nothing to open or
+/// the opener could not be spawned, never panicking.
+pub fn open_last_transcript() {
+    let Some(path) = last_session_path() else {
+        debug!("no session transcript to open yet");
+        return;
+    };
+    open_in_default_app(&path);
+}
+
+/// Spawn the OS "open this path" handler for `path`.
+fn open_in_default_app(path: &Path) {
+    #[cfg(target_os = "linux")]
+    let program = "xdg-open";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+
+    match std::process::Command::new(program).arg(path).spawn() {
+        Ok(_) => debug!("opened transcript {}", path.display()),
+        Err(e) => debug!("could not open transcript {}: {e}", path.display()),
+    }
+}
+
 /// Prune old session log files from `dir`. Removes files older than
 /// `max_age_days` days first, then removes the oldest remaining files if more
 /// than `max_count` still exist. Best-effort: errors are silently ignored.
@@ -232,6 +285,37 @@ mod tests {
         let dir = session_dir("empty");
         prune_sessions(&dir, 30, 100);
         assert_eq!(count_sessions(&dir), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn newest_session_picks_the_latest_stamp() {
+        let dir = session_dir("newest");
+        // Age in days descending → most recent has the largest unix-ms stamp.
+        make_session(&dir, 5);
+        make_session(&dir, 1);
+        make_session(&dir, 10);
+        let newest = newest_session_in(&dir).expect("a session exists");
+        // The 1-day-old file carries the largest stamp.
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let expected_ms = now_ms.saturating_sub(24 * 3600 * 1000);
+        assert_eq!(
+            newest.file_name().unwrap().to_string_lossy(),
+            format!("session-{expected_ms}.txt")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn newest_session_is_none_for_empty_or_unparseable() {
+        let dir = session_dir("newest-empty");
+        assert!(newest_session_in(&dir).is_none());
+        fs::write(dir.join("session-notanumber.txt"), "").unwrap();
+        fs::write(dir.join("other.txt"), "").unwrap();
+        assert!(newest_session_in(&dir).is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -473,6 +473,81 @@ impl Config {
     }
 }
 
+/// A single runtime setting change requested from the tray control surface.
+///
+/// Each variant names one switchable knob. Applying it mutates the live
+/// [`Config`] (so the *next* session picks it up without restarting the
+/// process) and writes the same value back to `~/.dit/config.toml` so the
+/// choice survives a restart. The two halves are kept separate — [`apply_to`]
+/// for the in-memory swap, [`persist`] for the on-disk store — so each can be
+/// unit-tested in isolation.
+///
+/// [`apply_to`]: Reconfigure::apply_to
+/// [`persist`]: Reconfigure::persist
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reconfigure {
+    /// Input device substring to prefer; `None` restores the system default.
+    Device(Option<String>),
+    /// Scribe language code (e.g. `pt`, `en`, `auto`).
+    Language(String),
+    /// Dictation mode: `true` strips filler words ("uh", "um"), `false` keeps
+    /// them verbatim. Mirrors the `--no-filler` flag.
+    NoFiller(bool),
+    /// Speech-to-text engine / model id (e.g. `scribe_v2_realtime`).
+    Model(String),
+}
+
+impl Reconfigure {
+    /// Apply this change to the live config so the next session uses it.
+    pub fn apply_to(&self, cfg: &mut Config) {
+        match self {
+            Reconfigure::Device(d) => cfg.device = d.clone(),
+            Reconfigure::Language(l) => cfg.language = l.clone(),
+            Reconfigure::NoFiller(b) => cfg.no_filler = *b,
+            Reconfigure::Model(m) => cfg.model = m.clone(),
+        }
+    }
+
+    /// Overlay this change onto an existing settings layer (used for both the
+    /// on-disk store and unit tests). Only the touched key is changed; every
+    /// other key in `layer` is left intact so unrelated settings survive.
+    fn overlay(&self, layer: &mut SettingsLayer) {
+        match self {
+            Reconfigure::Device(d) => layer.device = d.clone(),
+            Reconfigure::Language(l) => layer.language = Some(l.clone()),
+            Reconfigure::NoFiller(b) => layer.no_filler = Some(*b),
+            Reconfigure::Model(m) => layer.model = Some(m.clone()),
+        }
+    }
+
+    /// Persist this change to `~/.dit/config.toml`, preserving every other key
+    /// already present in the file. A missing file is created; a missing parent
+    /// directory is created too.
+    pub fn persist(&self) -> Result<()> {
+        let Some(path) = config_path() else {
+            return Ok(());
+        };
+        self.persist_to(&path)
+    }
+
+    /// Persistence against an explicit path (so tests need not touch `$HOME`).
+    fn persist_to(&self, path: &Path) -> Result<()> {
+        let mut layer = if path.exists() {
+            load_file_config(path)
+        } else {
+            SettingsLayer::default()
+        };
+        self.overlay(&mut layer);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating config dir {}", parent.display()))?;
+        }
+        let toml = toml::to_string_pretty(&layer).context("serializing config.toml")?;
+        std::fs::write(path, toml).with_context(|| format!("writing {}", path.display()))?;
+        Ok(())
+    }
+}
+
 /// Minimal percent-encoding for query values (keyterms may contain spaces/UTF-8).
 fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -904,6 +979,56 @@ mod tests {
             !url.contains("language_code"),
             "url should have no language_code: {url}"
         );
+    }
+
+    #[test]
+    fn reconfigure_apply_to_swaps_only_the_named_knob() {
+        let mut cfg = dummy_config("pt");
+        Reconfigure::Language("en".into()).apply_to(&mut cfg);
+        assert_eq!(cfg.language, "en");
+        // Other knobs untouched.
+        assert_eq!(cfg.model, "scribe_v2_realtime");
+        assert_eq!(cfg.device, None);
+
+        Reconfigure::Device(Some("USB Mic".into())).apply_to(&mut cfg);
+        assert_eq!(cfg.device.as_deref(), Some("USB Mic"));
+        Reconfigure::Device(None).apply_to(&mut cfg);
+        assert_eq!(cfg.device, None);
+
+        Reconfigure::NoFiller(true).apply_to(&mut cfg);
+        assert!(cfg.no_filler);
+
+        Reconfigure::Model("scribe_v2_realtime".into()).apply_to(&mut cfg);
+        assert_eq!(cfg.model, "scribe_v2_realtime");
+    }
+
+    #[test]
+    fn reconfigure_persist_writes_and_preserves_other_keys() {
+        let dir = std::env::temp_dir().join(format!("dit-reconfig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("config.toml");
+
+        // First write into a fresh (non-existent) file: parent dir is created.
+        Reconfigure::Language("es".into())
+            .persist_to(&path)
+            .expect("persists language");
+        let loaded = load_file_config(&path);
+        assert_eq!(loaded.language.as_deref(), Some("es"));
+
+        // A second, different change preserves the first.
+        Reconfigure::NoFiller(true)
+            .persist_to(&path)
+            .expect("persists no_filler");
+        let loaded = load_file_config(&path);
+        assert_eq!(loaded.language.as_deref(), Some("es"));
+        assert_eq!(loaded.no_filler, Some(true));
+
+        // Re-resolving from the merged layers reflects the persisted choice.
+        let resolved = merge(loaded, empty_env(), SettingsLayer::default());
+        assert_eq!(resolved.language, "es");
+        assert!(resolved.no_filler);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
