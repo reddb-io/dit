@@ -11,8 +11,7 @@ use clap::parser::ValueSource;
 use clap::{ArgMatches, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
-/// A platform-neutral toggle key (F1..F12). Converted to the right per-OS
-/// representation where it's used (global-hotkey on macOS/Windows, evdev on Linux).
+/// A function key, `F1`..`F12`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FunctionKey {
     F1,
@@ -27,6 +26,52 @@ pub enum FunctionKey {
     F10,
     F11,
     F12,
+}
+
+/// A side-agnostic modifier used inside a combination (the `Ctrl` in
+/// `Ctrl+Shift+F9`). Matches either the left or the right physical key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Modifier {
+    Ctrl,
+    Alt,
+    Shift,
+    Super,
+}
+
+/// A specific modifier key, with its side. Used when a single modifier key is
+/// bound as the whole hotkey (e.g. Right Alt).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidedModifier {
+    LeftCtrl,
+    RightCtrl,
+    LeftAlt,
+    RightAlt,
+    LeftShift,
+    RightShift,
+    LeftSuper,
+    RightSuper,
+}
+
+/// The key whose press fires the hotkey once any required [`Modifier`]s are held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TriggerKey {
+    /// A function key, `F1`..`F12`.
+    Function(FunctionKey),
+    /// A single modifier key bound on its own (e.g. Right Alt).
+    Modifier(SidedModifier),
+    /// The `Fn` key. Rarely capturable — handled in keyboard firmware on many
+    /// machines — so the per-platform mapping rejects it with a clear error.
+    Fn,
+}
+
+/// A platform-neutral toggle hotkey: zero or more held modifiers plus a trigger
+/// key. Supports plain function keys (`F9`), lone modifier keys (`RightAlt`) and
+/// combinations (`Ctrl+Shift+F9`). Converted to the right per-OS representation
+/// where it's used (global-hotkey on macOS/Windows, evdev on Linux).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hotkey {
+    pub modifiers: Vec<Modifier>,
+    pub trigger: TriggerKey,
 }
 
 /// Cross-platform voice dictation via ElevenLabs Scribe v2 Realtime.
@@ -45,7 +90,8 @@ pub struct Cli {
     #[arg(long, default_value = "scribe_v2_realtime")]
     pub model: String,
 
-    /// Toggle hotkey. Supports F1..F12 (e.g. `F9`).
+    /// Toggle hotkey. A function key (`F9`), a single modifier key (`RightAlt`,
+    /// `RightCtrl`) or a combination (`Ctrl+Shift+F9`).
     #[arg(long, default_value = "F9")]
     pub hotkey: String,
 
@@ -300,7 +346,7 @@ pub struct Config {
     pub api_key: String,
     pub language: String,
     pub model: String,
-    pub hotkey: FunctionKey,
+    pub hotkey: Hotkey,
     pub device: Option<String>,
     pub no_filler: bool,
     pub keyterms: Vec<String>,
@@ -436,23 +482,101 @@ fn load_env_file(path: &PathBuf) {
     }
 }
 
-/// Parse a function-key name into a [`FunctionKey`].
-fn parse_hotkey(name: &str) -> Result<FunctionKey> {
+/// Parse a hotkey spec into a [`Hotkey`].
+///
+/// Accepts a single key (`F9`, `RightAlt`) or a `+`-separated combination where
+/// every token but the last names a modifier and the last names the trigger key
+/// (`Ctrl+Shift+F9`). Tokens are case-insensitive and ignore `-`/`_`/spaces.
+fn parse_hotkey(spec: &str) -> Result<Hotkey> {
+    let parts: Vec<&str> = spec
+        .split('+')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    let Some((trigger_tok, mod_toks)) = parts.split_last() else {
+        bail!("empty hotkey");
+    };
+
+    let mut modifiers = Vec::with_capacity(mod_toks.len());
+    for tok in mod_toks {
+        let m = parse_modifier(tok).with_context(|| {
+            format!("{tok:?} is not a modifier; expected Ctrl, Alt, Shift or Super before the trigger key")
+        })?;
+        modifiers.push(m);
+    }
+
+    Ok(Hotkey {
+        modifiers,
+        trigger: parse_trigger(trigger_tok)?,
+    })
+}
+
+/// Normalise a token: lower-case and drop the cosmetic separators users sprinkle
+/// in (`Right-Alt`, `right_alt`, `Right Alt` all collapse to `rightalt`).
+fn normalize_token(tok: &str) -> String {
+    tok.chars()
+        .filter(|c| !matches!(c, '-' | '_' | ' '))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Parse a side-agnostic modifier name (the parts before the trigger in a combo).
+fn parse_modifier(tok: &str) -> Option<Modifier> {
+    use Modifier::*;
+    Some(match normalize_token(tok).as_str() {
+        "ctrl" | "control" => Ctrl,
+        "alt" | "option" | "opt" => Alt,
+        "shift" => Shift,
+        "super" | "cmd" | "command" | "win" | "windows" | "meta" => Super,
+        _ => return None,
+    })
+}
+
+/// Parse the trigger key: a function key, a single (sided) modifier key, or `Fn`.
+/// A bare modifier name (`Ctrl`) bound on its own resolves to its left key.
+fn parse_trigger(tok: &str) -> Result<TriggerKey> {
     use FunctionKey::*;
-    let key = match name.to_ascii_uppercase().as_str() {
-        "F1" => F1,
-        "F2" => F2,
-        "F3" => F3,
-        "F4" => F4,
-        "F5" => F5,
-        "F6" => F6,
-        "F7" => F7,
-        "F8" => F8,
-        "F9" => F9,
-        "F10" => F10,
-        "F11" => F11,
-        "F12" => F12,
-        other => bail!("only F1..F12 are supported, got {other}"),
+    use SidedModifier::*;
+    let key = match normalize_token(tok).as_str() {
+        "f1" => TriggerKey::Function(F1),
+        "f2" => TriggerKey::Function(F2),
+        "f3" => TriggerKey::Function(F3),
+        "f4" => TriggerKey::Function(F4),
+        "f5" => TriggerKey::Function(F5),
+        "f6" => TriggerKey::Function(F6),
+        "f7" => TriggerKey::Function(F7),
+        "f8" => TriggerKey::Function(F8),
+        "f9" => TriggerKey::Function(F9),
+        "f10" => TriggerKey::Function(F10),
+        "f11" => TriggerKey::Function(F11),
+        "f12" => TriggerKey::Function(F12),
+        "rightalt" | "altright" | "ralt" => TriggerKey::Modifier(RightAlt),
+        "leftalt" | "altleft" | "lalt" => TriggerKey::Modifier(LeftAlt),
+        "rightctrl" | "rightcontrol" | "ctrlright" | "controlright" | "rctrl" => {
+            TriggerKey::Modifier(RightCtrl)
+        }
+        "leftctrl" | "leftcontrol" | "ctrlleft" | "controlleft" | "lctrl" => {
+            TriggerKey::Modifier(LeftCtrl)
+        }
+        "rightshift" | "shiftright" | "rshift" => TriggerKey::Modifier(RightShift),
+        "leftshift" | "shiftleft" | "lshift" => TriggerKey::Modifier(LeftShift),
+        "rightsuper" | "rightcmd" | "rightwin" | "rightmeta" | "superright" => {
+            TriggerKey::Modifier(RightSuper)
+        }
+        "leftsuper" | "leftcmd" | "leftwin" | "leftmeta" | "superleft" => {
+            TriggerKey::Modifier(LeftSuper)
+        }
+        "fn" => TriggerKey::Fn,
+        _ => match parse_modifier(tok) {
+            Some(Modifier::Ctrl) => TriggerKey::Modifier(LeftCtrl),
+            Some(Modifier::Alt) => TriggerKey::Modifier(LeftAlt),
+            Some(Modifier::Shift) => TriggerKey::Modifier(LeftShift),
+            Some(Modifier::Super) => TriggerKey::Modifier(LeftSuper),
+            None => bail!(
+                "unsupported hotkey key {tok:?}; expected F1..F12, a modifier key \
+                 (e.g. RightAlt, RightCtrl) or Fn"
+            ),
+        },
     };
     Ok(key)
 }
@@ -466,6 +590,83 @@ mod tests {
     /// `env_layer` over an empty environment touches nothing.
     fn empty_env() -> SettingsLayer {
         env_layer(|_| None)
+    }
+
+    #[test]
+    fn parses_function_keys_unchanged() {
+        // F1..F12 keep working with no modifiers — the original contract.
+        assert_eq!(
+            parse_hotkey("F9").unwrap(),
+            Hotkey {
+                modifiers: vec![],
+                trigger: TriggerKey::Function(FunctionKey::F9),
+            }
+        );
+        // Case-insensitive, and the default spec still parses.
+        assert_eq!(
+            parse_hotkey("f12").unwrap().trigger,
+            TriggerKey::Function(FunctionKey::F12)
+        );
+        assert!(parse_hotkey(DEFAULT_HOTKEY).is_ok());
+    }
+
+    #[test]
+    fn parses_single_modifier_keys() {
+        // A lone modifier key (sided) becomes the trigger, with no held modifiers.
+        assert_eq!(
+            parse_hotkey("RightAlt").unwrap(),
+            Hotkey {
+                modifiers: vec![],
+                trigger: TriggerKey::Modifier(SidedModifier::RightAlt),
+            }
+        );
+        // Aliases and cosmetic separators normalise to the same key.
+        assert_eq!(
+            parse_hotkey("right-ctrl").unwrap().trigger,
+            TriggerKey::Modifier(SidedModifier::RightCtrl)
+        );
+        assert_eq!(
+            parse_hotkey("ralt").unwrap().trigger,
+            TriggerKey::Modifier(SidedModifier::RightAlt)
+        );
+        // A bare, unsided modifier resolves to its left key.
+        assert_eq!(
+            parse_hotkey("Super").unwrap().trigger,
+            TriggerKey::Modifier(SidedModifier::LeftSuper)
+        );
+    }
+
+    #[test]
+    fn parses_combinations() {
+        assert_eq!(
+            parse_hotkey("Ctrl+Shift+F9").unwrap(),
+            Hotkey {
+                modifiers: vec![Modifier::Ctrl, Modifier::Shift],
+                trigger: TriggerKey::Function(FunctionKey::F9),
+            }
+        );
+        // Modifier aliases are accepted, and whitespace around `+` is tolerated.
+        assert_eq!(
+            parse_hotkey(" control + alt + RightAlt ").unwrap(),
+            Hotkey {
+                modifiers: vec![Modifier::Ctrl, Modifier::Alt],
+                trigger: TriggerKey::Modifier(SidedModifier::RightAlt),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_keys_and_bad_modifiers() {
+        // An unknown trigger name is a clear error, not a silent no-op.
+        let err = parse_hotkey("F13").unwrap_err().to_string();
+        assert!(err.contains("F13"), "error should name the offending key: {err}");
+
+        // A non-modifier token before the final key is rejected too.
+        assert!(parse_hotkey("F1+F2").is_err());
+
+        // An empty spec is an error rather than a panic.
+        assert!(parse_hotkey("").is_err());
+        assert!(parse_hotkey("+").is_err());
     }
 
     #[test]
