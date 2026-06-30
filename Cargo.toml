@@ -14,6 +14,15 @@ categories = ["command-line-utilities", "multimedia::audio"]
 name = "dit"
 path = "src/main.rs"
 
+# `local` enables offline Whisper inference via candle (pure Rust, no API key).
+# `cargo build` (no features) produces the lean cloud-only binary.
+[features]
+local = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+]
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
@@ -35,6 +44,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 sha2 = "0.10"
 self-replace = "1"
+
+# Local Whisper engine (offline, pure Rust) — compiled only with --features local.
+candle-core = { version = "0.11", optional = true, default-features = false }
+candle-nn = { version = "0.11", optional = true, default-features = false }
+candle-transformers = { version = "0.11", optional = true, default-features = false }
 
 [profile.release]
 opt-level = 3
