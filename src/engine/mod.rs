@@ -43,6 +43,5 @@ pub trait Transcriber: Send + Sync {
 
     /// Transcribe a complete PCM-16 mono 16 kHz buffer and return the full
     /// transcript. Intended for batch/local-file transcription paths.
-    #[expect(dead_code)]
-    async fn transcribe_batch(&self, pcm: Vec<i16>, language: &str) -> Result<String>;
+    async fn transcribe_batch(&self, cfg: &Config, pcm: Vec<i16>) -> Result<String>;
 }
