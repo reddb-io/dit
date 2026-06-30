@@ -22,6 +22,7 @@ mod doctor;
 mod inject;
 #[cfg(target_os = "linux")]
 mod linux_input;
+mod models;
 mod notify;
 mod output;
 mod service;
@@ -84,6 +85,9 @@ fn main() -> Result<()> {
             force: *force,
             version: version.clone(),
         });
+    }
+    if let Some(Command::Models { action }) = &cli.command {
+        return models::run(action);
     }
     if cli.list_devices {
         return audio::list_devices();
