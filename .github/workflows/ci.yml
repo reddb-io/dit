@@ -32,7 +32,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev pkg-config
+          sudo apt-get install -y libasound2-dev pkg-config \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev
 
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
@@ -48,10 +50,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --features gui -- -D warnings
 
       - name: Build
         run: cargo build --release
+
+      - name: Build (gui feature)
+        run: cargo build --release --features gui
 
       - name: Test
         run: cargo test --release
