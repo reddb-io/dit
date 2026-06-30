@@ -254,8 +254,92 @@ impl Transcriber for ScribeEngine {
         Ok(())
     }
 
-    async fn transcribe_batch(&self, _pcm: Vec<i16>, _language: &str) -> Result<String> {
-        anyhow::bail!("batch transcription not yet implemented for ScribeEngine")
+    async fn transcribe_batch(&self, cfg: &Config, pcm: Vec<i16>) -> Result<String> {
+        let request = ClientRequestBuilder::new(cfg.ws_url().parse()?)
+            .with_header("xi-api-key", cfg.api_key.clone());
+        let (ws, _) = tokio_tungstenite::connect_async(request).await?;
+        let (mut write, mut read) = ws.split();
+
+        // Convert i16 PCM to s16le bytes, then stream in chunks
+        let mut buf: Vec<u8> = Vec::with_capacity(pcm.len() * 2);
+        for s in &pcm {
+            buf.extend_from_slice(&s.to_le_bytes());
+        }
+        let chunk_bytes = (SAMPLE_RATE * 2 * CHUNK_MS / 1000) as usize;
+        flush_chunks(&mut write, &mut buf, chunk_bytes).await?;
+        flush_chunks(&mut write, &mut buf, 1).await?;
+
+        // Force final commit, then close
+        write
+            .send(Message::text(
+                json!({
+                    "message_type": "input_audio_chunk",
+                    "audio_base_64": "",
+                    "sample_rate": SAMPLE_RATE,
+                    "commit": true
+                })
+                .to_string(),
+            ))
+            .await?;
+        let _ = write.send(Message::Close(None)).await;
+
+        // Drain committed_transcript messages until the server closes (30 s cap)
+        let collected = timeout(Duration::from_secs(30), async move {
+            let mut parts: Vec<String> = Vec::new();
+            while let Some(frame) = read.next().await {
+                match frame {
+                    Ok(Message::Text(raw)) => {
+                        let Ok(evt) = serde_json::from_str::<Value>(&raw) else {
+                            continue;
+                        };
+                        match evt
+                            .get("message_type")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                        {
+                            "committed_transcript"
+                            | "committed_transcript_with_timestamps" => {
+                                let t = evt
+                                    .get("text")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .trim();
+                                if !t.is_empty() {
+                                    parts.push(t.to_string());
+                                }
+                            }
+                            "error"
+                            | "auth_error"
+                            | "quota_exceeded"
+                            | "rate_limited"
+                            | "unaccepted_terms" => {
+                                let msg = evt
+                                    .get("error")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("unknown");
+                                return Err::<Vec<String>, anyhow::Error>(anyhow::anyhow!(
+                                    "scribe batch error: {msg}"
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+            Ok(parts)
+        })
+        .await;
+
+        match collected {
+            Ok(Ok(parts)) => Ok(parts.join(" ")),
+            Ok(Err(e)) => Err(e),
+            Err(_) => {
+                warn!("batch transcription timed out waiting for final commits");
+                Ok(String::new())
+            }
+        }
     }
 }
 

@@ -17,6 +17,7 @@
 //! Audio capture and the WebSocket always run on a background Tokio runtime.
 
 mod audio;
+mod cmd_transcribe;
 mod config;
 mod doctor;
 mod engine;
@@ -122,6 +123,30 @@ fn main() -> Result<()> {
     }
     if let Some(Command::Settings) = &cli.command {
         return settings::run();
+    }
+    if let Some(Command::Transcribe {
+        files,
+        out,
+        clipboard,
+        language,
+    }) = &cli.command
+    {
+        let output = if *clipboard {
+            cmd_transcribe::OutputDest::Clipboard
+        } else if let Some(path) = out {
+            cmd_transcribe::OutputDest::File(path.clone())
+        } else {
+            cmd_transcribe::OutputDest::Stdout
+        };
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        return rt.block_on(cmd_transcribe::run(cmd_transcribe::TranscribeArgs {
+            files: files.clone(),
+            output,
+            language: language.clone(),
+            env_file: cli.env_file.clone(),
+        }));
     }
     if cli.list_devices {
         return audio::list_devices();

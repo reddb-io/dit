@@ -155,6 +155,21 @@ pub enum Command {
     },
     /// Open the settings GUI (requires a build with the `gui` cargo feature).
     Settings,
+    /// Transcribe one or more audio files (wav, mp3, flac, m4a) to text.
+    Transcribe {
+        /// Audio files to transcribe.
+        #[arg(required = true)]
+        files: Vec<std::path::PathBuf>,
+        /// Write transcript to FILE instead of stdout.
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
+        /// Copy transcript to clipboard.
+        #[arg(long)]
+        clipboard: bool,
+        /// Language code (`pt`, `en`, …) or `auto` for auto-detection.
+        #[arg(long, default_value = "pt")]
+        language: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -201,7 +216,7 @@ pub(crate) const DEFAULT_LANGUAGE: &str = "pt";
 pub(crate) const DEFAULT_MODEL: &str = "scribe_v2_realtime";
 pub(crate) const DEFAULT_HOTKEY: &str = "F9";
 pub(crate) const DEFAULT_REGION: &str = "global";
-const DEFAULT_VAD_SILENCE: f64 = 1.5;
+pub(crate) const DEFAULT_VAD_SILENCE: f64 = 1.5;
 pub const DEFAULT_SESSION_MAX_AGE_DAYS: u64 = 30;
 pub const DEFAULT_SESSION_MAX_COUNT: usize = 100;
 
@@ -296,7 +311,7 @@ pub(crate) fn config_path() -> Option<PathBuf> {
 /// Read and parse `config.toml`. A missing, unreadable or malformed file
 /// degrades gracefully to an empty layer (the defaults are used) rather than
 /// crashing.
-fn load_file_config(path: &Path) -> SettingsLayer {
+pub(crate) fn load_file_config(path: &Path) -> SettingsLayer {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return SettingsLayer::default();
     };
@@ -564,7 +579,7 @@ fn percent_encode(s: &str) -> String {
 
 /// Minimal dotenv loader: `KEY=VALUE` lines, `#` comments, no overrides of
 /// values already present in the environment.
-fn load_env_file(path: &PathBuf) {
+pub(crate) fn load_env_file(path: &PathBuf) {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return;
     };
