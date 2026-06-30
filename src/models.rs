@@ -12,6 +12,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::config::ModelsAction;
 
+#[derive(Debug)]
 struct ModelEntry {
     id: &'static str,
     description: &'static str,
@@ -54,7 +55,11 @@ pub fn models_dir() -> PathBuf {
 pub fn resolve_model(name: &str) -> Option<PathBuf> {
     let entry = CATALOG.iter().find(|m| m.id == name)?;
     let path = model_path(entry);
-    if path.exists() { Some(path) } else { None }
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 fn model_path(entry: &ModelEntry) -> PathBuf {
@@ -69,9 +74,13 @@ pub fn run(action: &ModelsAction) -> Result<()> {
         }
 
         ModelsAction::List => {
-            println!("{:<20} {:<12} {}", "ID", "INSTALLED", "DESCRIPTION");
+            println!("{:<20} {:<12} DESCRIPTION", "ID", "INSTALLED");
             for entry in CATALOG {
-                let installed = if model_path(entry).exists() { "yes" } else { "no" };
+                let installed = if model_path(entry).exists() {
+                    "yes"
+                } else {
+                    "no"
+                };
                 println!("{:<20} {:<12} {}", entry.id, installed, entry.description);
             }
         }
@@ -79,8 +88,7 @@ pub fn run(action: &ModelsAction) -> Result<()> {
         ModelsAction::Download { id } => {
             let entry = find_model(id)?;
             let dir = models_dir();
-            std::fs::create_dir_all(&dir)
-                .with_context(|| format!("creating {}", dir.display()))?;
+            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
             let path = model_path(entry);
 
             if path.exists() {
@@ -105,8 +113,7 @@ pub fn run(action: &ModelsAction) -> Result<()> {
                 );
             }
 
-            std::fs::write(&path, &bytes)
-                .with_context(|| format!("writing {}", path.display()))?;
+            std::fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
             println!("✓ {} saved to {}", entry.id, path.display());
         }
 
@@ -116,8 +123,7 @@ pub fn run(action: &ModelsAction) -> Result<()> {
             if !path.exists() {
                 bail!("{} is not downloaded", id);
             }
-            std::fs::remove_file(&path)
-                .with_context(|| format!("removing {}", path.display()))?;
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
             println!("✓ removed {}", path.display());
         }
     }
@@ -139,8 +145,7 @@ fn sha256_bytes(data: &[u8]) -> String {
 }
 
 fn sha256_file(path: &PathBuf) -> Result<String> {
-    let data = std::fs::read(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     Ok(sha256_bytes(&data))
 }
 
@@ -191,9 +196,9 @@ mod tests {
         // In a fresh/CI environment the model file won't exist on disk.
         // We verify the function doesn't panic and returns None for missing files.
         let result = resolve_model("whisper-tiny");
-        if result.is_some() {
+        if let Some(item) = result {
             // Model is genuinely present — that's fine too.
-            assert!(result.unwrap().exists());
+            assert!(item.exists());
         }
     }
 
@@ -201,8 +206,14 @@ mod tests {
     fn find_model_errors_on_unknown_id() {
         let err = find_model("not-a-real-model").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("unknown model id"), "unexpected message: {msg}");
-        assert!(msg.contains("not-a-real-model"), "message missing id: {msg}");
+        assert!(
+            msg.contains("unknown model id"),
+            "unexpected message: {msg}"
+        );
+        assert!(
+            msg.contains("not-a-real-model"),
+            "message missing id: {msg}"
+        );
     }
 
     #[test]

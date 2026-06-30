@@ -101,8 +101,7 @@ impl Transcriber for ScribeEngine {
                     // Stable text — both the plain and the timestamped variant carry
                     // the committed segment under `text`.
                     "committed_transcript" | "committed_transcript_with_timestamps" => {
-                        let text =
-                            evt.get("text").and_then(Value::as_str).unwrap_or("").trim();
+                        let text = evt.get("text").and_then(Value::as_str).unwrap_or("").trim();
                         // This segment is now committed, so the previewed tail is
                         // accounted for — drop it from the recovery buffer.
                         pending.clear();
