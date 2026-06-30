@@ -114,6 +114,8 @@ pub enum Command {
         #[command(subcommand)]
         action: ModelsAction,
     },
+    /// Open the settings GUI (requires the `gui` cargo feature).
+    Settings,
 }
 
 #[derive(Subcommand, Debug)]
@@ -248,14 +250,19 @@ fn merge(file: SettingsLayer, env: SettingsLayer, cli: SettingsLayer) -> Resolve
 }
 
 /// Path to the persistent config store, `~/.dit/config.toml`.
-fn config_path() -> Option<PathBuf> {
+pub fn config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".dit").join("config.toml"))
+}
+
+/// Path to the dotenv-style API key file, `~/.dit.env`.
+pub fn default_env_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".dit.env"))
 }
 
 /// Read and parse `config.toml`. A missing, unreadable or malformed file
 /// degrades gracefully to an empty layer (the defaults are used) rather than
 /// crashing.
-fn load_file_config(path: &Path) -> SettingsLayer {
+pub fn load_file_config(path: &Path) -> SettingsLayer {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return SettingsLayer::default();
     };
@@ -266,6 +273,16 @@ fn load_file_config(path: &Path) -> SettingsLayer {
             SettingsLayer::default()
         }
     }
+}
+
+/// Persist `layer` to `path`, creating parent directories as needed.
+pub fn save_config(path: &Path, layer: &SettingsLayer) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("create ~/.dit directory")?;
+    }
+    let contents = toml::to_string_pretty(layer).context("serialize config")?;
+    std::fs::write(path, contents).context("write config.toml")?;
+    Ok(())
 }
 
 /// Derive the environment layer from `DIT_*` variables. Pure: the variable
