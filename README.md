@@ -171,6 +171,7 @@ echo 'ELEVENLABS_API_KEY=sk_your_key_here' > ~/.dit.env
 dit                              # F9 toggle, Portuguese
 dit --language en                # English
 dit --hotkey F8                  # any of F1..F12
+dit --mode hold                  # hold the hotkey to record, release to stop
 dit --device "Fifine"            # prefer an input device by name substring
 dit --no-filler                  # strip "uh"/"um" from the output
 dit --keyterm RedDB --keyterm Scribe   # bias toward names/jargon (repeatable)
@@ -189,6 +190,7 @@ Press **F9** → speak → press **F9** again. While recording, the tray icon be
 | `--language` | `pt` | Scribe language code (`pt`, `en`, `es`, …) |
 | `--model` | `scribe_v2_realtime` | Scribe realtime model id |
 | `--hotkey` | `F9` | Toggle key (`F1`..`F12`) |
+| `--mode` | `toggle` | `toggle` (press to start/stop) or `hold` (hold to record, release to stop) |
 | `--device` | *system default* | Input device name substring |
 | `--no-filler` | off | Remove filler words (`no_verbatim`) |
 | `--keyterm <TERM>` | — | Bias the model toward a term; repeatable |
