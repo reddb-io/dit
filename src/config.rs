@@ -850,7 +850,10 @@ mod tests {
     fn parse_hotkey_rejects_unknown_and_malformed_keys() {
         // An unrecognised key name is an error, not a silent no-op.
         let err = parse_hotkey("Banana").unwrap_err().to_string();
-        assert!(err.contains("Banana"), "error should name the bad key: {err}");
+        assert!(
+            err.contains("Banana"),
+            "error should name the bad key: {err}"
+        );
 
         // A modifier in trigger position that isn't a real key is rejected.
         assert!(parse_hotkey("Ctrl+Nope").is_err());

@@ -434,7 +434,10 @@ mod tests {
             combo.modifiers,
             vec![
                 [KeyCode::KEY_LEFTCTRL.code(), KeyCode::KEY_RIGHTCTRL.code()],
-                [KeyCode::KEY_LEFTSHIFT.code(), KeyCode::KEY_RIGHTSHIFT.code()],
+                [
+                    KeyCode::KEY_LEFTSHIFT.code(),
+                    KeyCode::KEY_RIGHTSHIFT.code()
+                ],
             ]
         );
     }
