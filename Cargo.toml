@@ -14,6 +14,11 @@ categories = ["command-line-utilities", "multimedia::audio"]
 name = "dit"
 path = "src/main.rs"
 
+[features]
+# Native settings window (eframe/egui). Enabled in release builds and CI.
+# The headless dictation path works without this feature and needs only libasound.
+gui = ["dep:eframe"]
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
@@ -35,6 +40,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 sha2 = "0.10"
 self-replace = "1"
+eframe = { version = "0.35", optional = true }
 
 [profile.release]
 opt-level = 3
