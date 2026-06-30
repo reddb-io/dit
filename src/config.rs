@@ -117,6 +117,16 @@ pub struct Cli {
     #[arg(long)]
     pub paste_shift: bool,
 
+    /// Linux only: deliver the transcript by *typing* it via the virtual
+    /// keyboard instead of pasting through the clipboard. Characters the active
+    /// layout can type are injected directly; accents/symbols/emoji it can't
+    /// type fall back to the clipboard. Avoids the clipboard for most text,
+    /// sidestepping the Wayland "paste interpreted as image" bug, and does not
+    /// clobber the clipboard for fully-typeable text. (No-op on macOS/Windows,
+    /// which already type via enigo.)
+    #[arg(long = "type")]
+    pub type_hybrid: bool,
+
     /// Path to a dotenv-style file holding `ELEVENLABS_API_KEY`.
     /// Defaults to `~/.dit.env`.
     #[arg(long)]
@@ -222,6 +232,7 @@ pub struct SettingsLayer {
     pub region: Option<String>,
     pub no_preview: Option<bool>,
     pub paste_shift: Option<bool>,
+    pub type_hybrid: Option<bool>,
     pub session_max_age_days: Option<u64>,
     pub session_max_count: Option<usize>,
 }
@@ -241,6 +252,7 @@ struct ResolvedSettings {
     region: String,
     no_preview: bool,
     paste_shift: bool,
+    type_hybrid: bool,
     session_max_age_days: u64,
     session_max_count: usize,
 }
@@ -273,6 +285,7 @@ fn merge(file: SettingsLayer, env: SettingsLayer, cli: SettingsLayer) -> Resolve
         region: pick(DEFAULT_REGION.into(), file.region, env.region, cli.region),
         no_preview: pick(false, file.no_preview, env.no_preview, cli.no_preview),
         paste_shift: pick(false, file.paste_shift, env.paste_shift, cli.paste_shift),
+        type_hybrid: pick(false, file.type_hybrid, env.type_hybrid, cli.type_hybrid),
         session_max_age_days: pick(
             DEFAULT_SESSION_MAX_AGE_DAYS,
             file.session_max_age_days,
@@ -332,6 +345,7 @@ fn env_layer(get: impl Fn(&str) -> Option<String>) -> SettingsLayer {
         region: s("DIT_REGION"),
         no_preview: flag("DIT_NO_PREVIEW"),
         paste_shift: flag("DIT_PASTE_SHIFT"),
+        type_hybrid: flag("DIT_TYPE"),
         session_max_age_days: s("DIT_SESSION_MAX_AGE_DAYS").and_then(|v| v.parse().ok()),
         session_max_count: s("DIT_SESSION_MAX_COUNT").and_then(|v| v.parse().ok()),
     }
@@ -353,6 +367,7 @@ fn cli_layer(cli: &Cli, matches: &ArgMatches) -> SettingsLayer {
         region: on_cli("region").then(|| cli.region.clone()),
         no_preview: on_cli("no_preview").then_some(cli.no_preview),
         paste_shift: on_cli("paste_shift").then_some(cli.paste_shift),
+        type_hybrid: on_cli("type_hybrid").then_some(cli.type_hybrid),
         session_max_age_days: None,
         session_max_count: None,
     }
@@ -372,6 +387,7 @@ pub struct Config {
     pub region: String,
     pub no_preview: bool,
     pub paste_shift: bool,
+    pub type_hybrid: bool,
     pub session_max_age_days: u64,
     pub session_max_count: usize,
 }
@@ -426,6 +442,7 @@ impl Config {
             region: settings.region,
             no_preview: settings.no_preview,
             paste_shift: settings.paste_shift,
+            type_hybrid: settings.type_hybrid,
             session_max_age_days: settings.session_max_age_days,
             session_max_count: settings.session_max_count,
         })
@@ -758,6 +775,35 @@ mod tests {
     }
 
     #[test]
+    fn type_flag_layers_through_cli_env_and_file() {
+        // `--type` (the opt-in hybrid typing path) must flow through the same
+        // defaults < file < env < cli ladder as the other knobs.
+        assert!(!merge(
+            SettingsLayer::default(),
+            SettingsLayer::default(),
+            SettingsLayer::default(),
+        )
+        .type_hybrid);
+
+        let matches = Cli::command().get_matches_from(["dit", "--type"]);
+        let cli = Cli::from_arg_matches(&matches).expect("parses");
+        let layer = cli_layer(&cli, &matches);
+        assert_eq!(layer.type_hybrid, Some(true));
+        assert!(merge(SettingsLayer::default(), empty_env(), layer).type_hybrid);
+
+        // Honoured from the environment too.
+        let env = env_layer(|k| (k == "DIT_TYPE").then(|| "1".to_string()));
+        assert_eq!(env.type_hybrid, Some(true));
+
+        // And from the on-disk config file.
+        let file = SettingsLayer {
+            type_hybrid: Some(true),
+            ..Default::default()
+        };
+        assert!(merge(file, empty_env(), SettingsLayer::default()).type_hybrid);
+    }
+
+    #[test]
     fn passed_cli_flag_overrides_the_config_file() {
         // Regression guard: a value in config.toml is honoured, but a CLI flag
         // still wins — the contract for existing flags.
@@ -883,6 +929,7 @@ mod tests {
             region: "global".into(),
             no_preview: false,
             paste_shift: false,
+            type_hybrid: false,
             session_max_age_days: DEFAULT_SESSION_MAX_AGE_DAYS,
             session_max_count: DEFAULT_SESSION_MAX_COUNT,
         }
