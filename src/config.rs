@@ -11,6 +11,16 @@ use clap::parser::ValueSource;
 use clap::{ArgMatches, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
+/// Whether the hotkey acts as a press-to-toggle or hold-to-record trigger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RecordingMode {
+    /// Press once to start, press again to stop (the original behaviour).
+    #[default]
+    Toggle,
+    /// Hold the key to record; release it to stop.
+    Hold,
+}
+
 /// A platform-neutral toggle key (F1..F12). Converted to the right per-OS
 /// representation where it's used (global-hotkey on macOS/Windows, evdev on Linux).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +59,11 @@ pub struct Cli {
     /// Toggle hotkey. Supports F1..F12 (e.g. `F9`).
     #[arg(long, default_value = "F9")]
     pub hotkey: String,
+
+    /// Recording mode: `toggle` (press once to start, again to stop) or
+    /// `hold` (hold the key to record, release to stop).
+    #[arg(long, default_value = "toggle")]
+    pub mode: String,
 
     /// Input device name substring to prefer (otherwise the system default).
     #[arg(long)]
@@ -159,6 +174,7 @@ pub enum ServiceAction {
 const DEFAULT_LANGUAGE: &str = "pt";
 const DEFAULT_MODEL: &str = "scribe_v2_realtime";
 const DEFAULT_HOTKEY: &str = "F9";
+const DEFAULT_MODE: &str = "toggle";
 const DEFAULT_REGION: &str = "global";
 const DEFAULT_VAD_SILENCE: f64 = 1.5;
 pub const DEFAULT_SESSION_MAX_AGE_DAYS: u64 = 30;
@@ -174,6 +190,7 @@ pub struct SettingsLayer {
     pub language: Option<String>,
     pub model: Option<String>,
     pub hotkey: Option<String>,
+    pub mode: Option<String>,
     pub device: Option<String>,
     pub no_filler: Option<bool>,
     pub keyterms: Option<Vec<String>>,
@@ -193,6 +210,7 @@ struct ResolvedSettings {
     language: String,
     model: String,
     hotkey: String,
+    mode: String,
     device: Option<String>,
     no_filler: bool,
     keyterms: Vec<String>,
@@ -219,6 +237,7 @@ fn merge(file: SettingsLayer, env: SettingsLayer, cli: SettingsLayer) -> Resolve
         ),
         model: pick(DEFAULT_MODEL.into(), file.model, env.model, cli.model),
         hotkey: pick(DEFAULT_HOTKEY.into(), file.hotkey, env.hotkey, cli.hotkey),
+        mode: pick(DEFAULT_MODE.into(), file.mode, env.mode, cli.mode),
         // `device` is itself optional, so its resolved default is simply "unset".
         device: cli.device.or(env.device).or(file.device),
         no_filler: pick(false, file.no_filler, env.no_filler, cli.no_filler),
@@ -279,6 +298,7 @@ fn env_layer(get: impl Fn(&str) -> Option<String>) -> SettingsLayer {
         language: s("DIT_LANGUAGE"),
         model: s("DIT_MODEL"),
         hotkey: s("DIT_HOTKEY"),
+        mode: s("DIT_MODE"),
         device: s("DIT_DEVICE"),
         no_filler: flag("DIT_NO_FILLER"),
         keyterms: s("DIT_KEYTERMS").map(|v| {
@@ -305,6 +325,7 @@ fn cli_layer(cli: &Cli, matches: &ArgMatches) -> SettingsLayer {
         language: on_cli("language").then(|| cli.language.clone()),
         model: on_cli("model").then(|| cli.model.clone()),
         hotkey: on_cli("hotkey").then(|| cli.hotkey.clone()),
+        mode: on_cli("mode").then(|| cli.mode.clone()),
         device: on_cli("device").then(|| cli.device.clone()).flatten(),
         no_filler: on_cli("no_filler").then_some(cli.no_filler),
         keyterms: on_cli("keyterms").then(|| cli.keyterms.clone()),
@@ -324,6 +345,7 @@ pub struct Config {
     pub language: String,
     pub model: String,
     pub hotkey: FunctionKey,
+    pub mode: RecordingMode,
     pub device: Option<String>,
     pub no_filler: bool,
     pub keyterms: Vec<String>,
@@ -372,12 +394,15 @@ impl Config {
 
         let hotkey = parse_hotkey(&settings.hotkey)
             .with_context(|| format!("unsupported hotkey: {}", settings.hotkey))?;
+        let mode = parse_mode(&settings.mode)
+            .with_context(|| format!("unsupported mode: {}", settings.mode))?;
 
         Ok(Self {
             api_key,
             language: settings.language,
             model: settings.model,
             hotkey,
+            mode,
             device: settings.device,
             no_filler: settings.no_filler,
             keyterms: settings.keyterms,
@@ -467,6 +492,15 @@ fn load_env_file(path: &PathBuf) {
     }
 }
 
+/// Parse a recording mode string into a [`RecordingMode`].
+fn parse_mode(s: &str) -> Result<RecordingMode> {
+    match s.to_ascii_lowercase().as_str() {
+        "toggle" => Ok(RecordingMode::Toggle),
+        "hold" => Ok(RecordingMode::Hold),
+        other => bail!("unsupported mode: {other} (use 'toggle' or 'hold')"),
+    }
+}
+
 /// Parse a function-key name into a [`FunctionKey`].
 fn parse_hotkey(name: &str) -> Result<FunctionKey> {
     use FunctionKey::*;
@@ -507,6 +541,7 @@ mod tests {
         assert_eq!(cli.language, DEFAULT_LANGUAGE);
         assert_eq!(cli.model, DEFAULT_MODEL);
         assert_eq!(cli.hotkey, DEFAULT_HOTKEY);
+        assert_eq!(cli.mode, DEFAULT_MODE);
         assert_eq!(cli.region, DEFAULT_REGION);
         assert_eq!(cli.vad_silence, DEFAULT_VAD_SILENCE);
     }
@@ -521,6 +556,7 @@ mod tests {
         assert_eq!(resolved.language, DEFAULT_LANGUAGE);
         assert_eq!(resolved.model, DEFAULT_MODEL);
         assert_eq!(resolved.hotkey, DEFAULT_HOTKEY);
+        assert_eq!(resolved.mode, DEFAULT_MODE);
         assert_eq!(resolved.region, DEFAULT_REGION);
         assert_eq!(resolved.vad_silence, DEFAULT_VAD_SILENCE);
         assert_eq!(resolved.device, None);
@@ -682,6 +718,7 @@ mod tests {
             language: language.into(),
             model: "scribe_v2_realtime".into(),
             hotkey: FunctionKey::F9,
+            mode: RecordingMode::Toggle,
             device: None,
             no_filler: false,
             keyterms: vec![],
@@ -692,6 +729,53 @@ mod tests {
             session_max_age_days: DEFAULT_SESSION_MAX_AGE_DAYS,
             session_max_count: DEFAULT_SESSION_MAX_COUNT,
         }
+    }
+
+    #[test]
+    fn mode_toggle_is_the_default() {
+        let resolved = merge(
+            SettingsLayer::default(),
+            env_layer(|_| None),
+            SettingsLayer::default(),
+        );
+        assert_eq!(resolved.mode, DEFAULT_MODE);
+        assert_eq!(parse_mode(&resolved.mode).unwrap(), RecordingMode::Toggle);
+    }
+
+    #[test]
+    fn mode_hold_is_accepted_case_insensitively() {
+        for s in &["hold", "Hold", "HOLD"] {
+            assert_eq!(parse_mode(s).unwrap(), RecordingMode::Hold, "input: {s}");
+        }
+    }
+
+    #[test]
+    fn mode_invalid_returns_error() {
+        assert!(parse_mode("push").is_err());
+        assert!(parse_mode("").is_err());
+    }
+
+    #[test]
+    fn mode_propagates_through_all_layers() {
+        // via config file
+        let file = SettingsLayer {
+            mode: Some("hold".into()),
+            ..Default::default()
+        };
+        let resolved = merge(file, env_layer(|_| None), SettingsLayer::default());
+        assert_eq!(resolved.mode, "hold");
+
+        // via env
+        let env = env_layer(|k| (k == "DIT_MODE").then(|| "hold".into()));
+        let resolved = merge(SettingsLayer::default(), env, SettingsLayer::default());
+        assert_eq!(resolved.mode, "hold");
+
+        // via CLI
+        let matches = Cli::command().get_matches_from(["dit", "--mode", "hold"]);
+        let cli = Cli::from_arg_matches(&matches).expect("parses");
+        let cli_overrides = cli_layer(&cli, &matches);
+        let resolved = merge(SettingsLayer::default(), env_layer(|_| None), cli_overrides);
+        assert_eq!(resolved.mode, "hold");
     }
 
     #[test]
@@ -706,13 +790,19 @@ mod tests {
     #[test]
     fn ws_url_auto_language_omits_language_code_param() {
         let url = dummy_config("auto").ws_url();
-        assert!(!url.contains("language_code"), "url should have no language_code: {url}");
+        assert!(
+            !url.contains("language_code"),
+            "url should have no language_code: {url}"
+        );
     }
 
     #[test]
     fn auto_propagates_through_all_config_layers() {
         // via config file layer
-        let file = SettingsLayer { language: Some("auto".into()), ..Default::default() };
+        let file = SettingsLayer {
+            language: Some("auto".into()),
+            ..Default::default()
+        };
         let resolved = merge(file, empty_env(), SettingsLayer::default());
         assert_eq!(resolved.language, "auto");
 
