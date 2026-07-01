@@ -53,10 +53,15 @@ use transcribe::run_session;
 /// hotkey (toggles are ignored while paused). `OpenLastTranscript` opens the
 /// most recent session log in the platform's default handler.
 pub enum Control {
+    /// Toggle mode: flip between recording and idle.
     Toggle,
     Reconfigure(config::Reconfigure),
     SetPaused(bool),
     OpenLastTranscript,
+    /// Hold mode: key pressed — start recording if idle.
+    KeyDown,
+    /// Hold mode: key released — stop recording if active.
+    KeyUp,
 }
 
 /// Language presets offered in the tray "Language" submenu: (label, code).
@@ -175,31 +180,54 @@ async fn manager(
     let mut current: Option<(Arc<Notify>, JoinHandle<Result<()>>)> = None;
     let mut paused = false;
 
+    let start_session = |cfg: &Config,
+                         injector: &Injector,
+                         state_tx: &UnboundedSender<IconState>|
+     -> (Arc<Notify>, JoinHandle<Result<()>>) {
+        let stop = Arc::new(Notify::new());
+        let handle = tokio::spawn(run_session(
+            cfg.clone(),
+            injector.clone(),
+            stop.clone(),
+            state_tx.clone(),
+        ));
+        (stop, handle)
+    };
+
+    let stop_session = |pair: (Arc<Notify>, JoinHandle<Result<()>>)| {
+        let (stop, handle) = pair;
+        if !handle.is_finished() {
+            stop.notify_one();
+            tokio::spawn(async move {
+                if let Ok(Err(e)) = handle.await {
+                    error!("session error: {e:#}");
+                }
+            });
+        }
+    };
+
     while let Some(msg) = rx.recv().await {
         match msg {
-            // Paused suspends the hotkey: toggles are ignored until resumed, but
-            // a session already running keeps going.
+            // Paused suspends the hotkey: toggles are ignored until resumed.
             Control::Toggle if paused => {}
             Control::Toggle => match current.take() {
-                Some((stop, handle)) if !handle.is_finished() => {
-                    stop.notify_one();
-                    tokio::spawn(async move {
-                        if let Ok(Err(e)) = handle.await {
-                            error!("session error: {e:#}");
-                        }
-                    });
-                }
+                Some(pair) if !pair.1.is_finished() => stop_session(pair),
                 _ => {
-                    let stop = Arc::new(Notify::new());
-                    let handle = tokio::spawn(run_session(
-                        cfg.clone(),
-                        injector.clone(),
-                        stop.clone(),
-                        state_tx.clone(),
-                    ));
-                    current = Some((stop, handle));
+                    current = Some(start_session(&cfg, &injector, &state_tx));
                 }
             },
+            Control::KeyDown => {
+                // Hold mode: start only if not already recording.
+                if current.as_ref().map_or(true, |(_, h)| h.is_finished()) {
+                    current = Some(start_session(&cfg, &injector, &state_tx));
+                }
+            }
+            Control::KeyUp => {
+                // Hold mode: stop the active session.
+                if let Some(pair) = current.take() {
+                    stop_session(pair);
+                }
+            }
             // Apply to the live config so the next session uses it, and persist
             // the choice to ~/.dit/config.toml so it survives a restart.
             Control::Reconfigure(r) => {
@@ -585,7 +613,7 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
     // Hotkey via evdev (/dev/input) — works on X11 and Wayland alike.
     match linux_input::evdev_binding(&cfg.hotkey) {
         Ok(binding) => {
-            if let Err(e) = linux_input::spawn_hotkey(binding, tx) {
+            if let Err(e) = linux_input::spawn_hotkey(binding, tx, cfg.mode) {
                 error!("{e:#}");
                 notify::notify("dit — hotkey unavailable", &format!("{e}"));
             }
@@ -859,8 +887,21 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100));
 
         if let Ok(ev) = hotkey_rx.try_recv() {
-            if ev.id == hotkey_id && ev.state == HotKeyState::Pressed {
-                let _ = tx.send(Control::Toggle);
+            if ev.id == hotkey_id {
+                match cfg.mode {
+                    config::RecordingMode::Toggle => {
+                        if ev.state == HotKeyState::Pressed {
+                            let _ = tx.send(Control::Toggle);
+                        }
+                    }
+                    config::RecordingMode::Hold => {
+                        if ev.state == HotKeyState::Pressed {
+                            let _ = tx.send(Control::KeyDown);
+                        } else if ev.state == HotKeyState::Released {
+                            let _ = tx.send(Control::KeyUp);
+                        }
+                    }
+                }
             }
         }
         if let Ok(ev) = menu_rx.try_recv() {
