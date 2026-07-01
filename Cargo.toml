@@ -1,6 +1,6 @@
 [package]
 name = "dit"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2021"
 description = "Cross-platform push-to-toggle voice dictation via ElevenLabs Scribe v2 Realtime — speak, and the transcript is pasted into whatever app is focused."
 authors = ["RedDB.io"]
