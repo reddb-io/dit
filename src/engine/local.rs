@@ -42,6 +42,9 @@ const SOT: u32 = 50258;
 const EOT: u32 = 50256;
 const TRANSCRIBE: u32 = 50359;
 const NO_TIMESTAMPS: u32 = 50363;
+// Language tokens occupy 50259..=50357 (99 languages, Whisper multilingual).
+const LANG_TOK_START: u32 = 50259;
+const LANG_TOK_END: u32 = 50357;
 
 fn language_token(lang: &str) -> u32 {
     match lang {
@@ -214,7 +217,19 @@ fn transcribe_blocking(model_path: &PathBuf, raw_pcm: Vec<u8>, language: &str) -
     let features = model.encoder.forward(&mel, true).context("encoder")?;
 
     // Greedy decode (full-sequence, no incremental KV cache).
-    let lang_tok = language_token(language);
+    let lang_tok = if language == "auto" {
+        // Detect language: one forward pass with [SOT], argmax over language token range.
+        let sot_in = Tensor::from_slice(&[SOT], (1, 1), &device).context("sot tensor")?;
+        let logits = model.decoder.forward(&sot_in, &features, true).context("lang detect")?;
+        let last = logits.get(0)?.get(0)?;
+        let lang_range = (LANG_TOK_END - LANG_TOK_START + 1) as usize;
+        let lang_logits = last.narrow(0, LANG_TOK_START as usize, lang_range).context("lang slice")?;
+        let detected = lang_logits.argmax(0)?.to_scalar::<u32>().context("lang argmax")? + LANG_TOK_START;
+        info!("local: auto-detected language token {detected}");
+        detected
+    } else {
+        language_token(language)
+    };
     let mut tokens: Vec<u32> = vec![SOT, lang_tok, TRANSCRIBE, NO_TIMESTAMPS];
     let mut output: Vec<u32> = vec![];
 
