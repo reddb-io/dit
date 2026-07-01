@@ -6,3 +6,6 @@
 
 # stray tooling state
 .red/
+.red/tmp/
+.red/state/
+.claude/

@@ -14,22 +14,28 @@
 
 ---
 
-`dit` streams your microphone to [ElevenLabs **Scribe v2 Realtime**](https://elevenlabs.io/docs/api-reference/speech-to-text)
-and pastes each finalized sentence into the focused window the instant it's ready — no app
-to switch to, no transcript window to copy out of. It's a single static binary, written in
-Rust, that runs the same way on **Linux, macOS and Windows**.
+`dit` is a cross-platform voice dictation tool: press a key, speak, and the transcript is pasted into whatever app is focused — no switching windows, no copy-paste.
 
-It started as [`whisperflow.py`](https://gist.github.com/filipeforattini/a8c3c91c093245566db924c4d8c75ac7) —
-a Linux/Wayland-only Python script. This is the portable, dependency-light rewrite.
+It supports two transcription engines:
+
+- **Cloud** (default) — streams your mic to [ElevenLabs Scribe v2 Realtime](https://elevenlabs.io/docs/api-reference/speech-to-text), real-time word-by-word delivery
+- **Local** (`--engine local`) — records while you hold/toggle the key, then transcribes fully **offline** with a [Whisper](https://openai.com/research/whisper) model (pure-Rust via `candle`). No API key, no network, no cost per use.
+
+It's a single static binary written in Rust, identical on **Linux, macOS and Windows**.
 
 ```
-   ┌─ press F9 ─────────────────────────────────────────────── press F9 ─┐
-   ▼                                                                      ▼
- mic ──► resample 16 kHz ──► WebSocket ──► Scribe v2 Realtime
-                                                  │
-                       committed_transcript ◄─────┘
-                                  │
-                       typed as keystrokes  ──►  ✶ focused app
+── Cloud ──────────────────────────────────────────────────────────────────
+mic ──► resample 16 kHz ──► WebSocket ──► Scribe v2 Realtime
+                                                 │
+                      committed_transcript ◄──────┘
+                                 │
+                      typed as keystrokes  ──►  ✶ focused app
+
+── Local (offline) ────────────────────────────────────────────────────────
+[hold key] mic ──► resample 16 kHz ──► buffer
+[release]  buffer ──► Whisper (candle, CPU) ──► transcript
+                                                      │
+                                           typed as keystrokes  ──►  ✶ focused app
 ```
 
 ---
@@ -48,48 +54,21 @@ curl -fsSL https://raw.githubusercontent.com/reddb-io/dit/main/install.sh | bash
 irm https://raw.githubusercontent.com/reddb-io/dit/main/install.ps1 | iex
 ```
 
-The installer detects your OS/arch, picks the **best build for your host** (see below), downloads
-the matching binary, verifies its `.sha256`, installs or updates it (`~/.local/bin` on Unix,
-`%LOCALAPPDATA%\Programs\dit` on Windows) and puts it on your `PATH`. If `dit` is already installed,
-it reads the local `dit --version`, compares it with the requested/latest release, skips a no-op
-reinstall when already current, and updates older local binaries in place. On Linux it also restarts
-an active `dit.service` so the running desktop agent picks up the new binary.
-
-It then walks you through the rest interactively: **prompts for your ElevenLabs API key**, offers to
-**install the runtime libraries** (detecting apt/dnf/pacman/zypper), and offers to **set up the
-autostart service** — then smoke-tests that the binary runs.
+The installer detects your OS/arch, picks the best build, downloads and verifies the `.sha256`, installs to `~/.local/bin` (Unix) or `%LOCALAPPDATA%\Programs\dit` (Windows), and walks you through the API key, runtime deps, and autostart service.
 
 ```bash
-# fully non-interactive, e.g. for provisioning
+# fully non-interactive
 curl -fsSL .../install.sh | bash -s -- --yes --api-key sk_... --with-service
-# other flags
-curl -fsSL .../install.sh | bash -s -- --version v0.1.0
-curl -fsSL .../install.sh | bash -s -- --install-dir /usr/local/bin --skip-deps --no-service
 ```
 
 ### Staying up to date — `dit update`
-
-Once installed, dit upgrades itself. **`dit update`** is a first-class, self-contained command — no
-`curl | bash`, no re-running the installer:
 
 ```bash
 dit update            # upgrade to the latest release (no-op if already current)
 dit update --check    # just report whether a newer version exists
 dit update --force    # re-download and reinstall the current version
-dit update --version v0.2.4   # pin a specific release
+dit update --version v0.3.0   # pin a specific release
 ```
-
-What it does, end to end:
-
-- **Resolves** the latest release from the GitHub API (or the tag you pin).
-- **Picks the right asset for *this* host** — correct arch, and the glibc-portable vs. fully-static
-  `-static` variant inferred from how the running binary itself was built.
-- **Downloads over HTTPS** (rustls, no system OpenSSL) and **verifies the published `SHA-256`** before
-  touching anything — a mismatch aborts the update.
-- **Atomically replaces the running executable** in place (safe on Windows too), then on Linux
-  **restarts an active `dit.service`** so the desktop agent picks up the new binary.
-- **Idempotent:** running it twice in a row just prints *"already the latest release — nothing to
-  update."*
 
 ### Manual download
 
@@ -106,36 +85,21 @@ Grab the binary for your platform from the [**Releases**](https://github.com/red
 | macOS Intel | `dit-macos-x86_64` |
 | Windows x86_64 | `dit-windows-x86_64.exe` |
 
-```bash
-curl -fsSL https://github.com/reddb-io/dit/releases/latest/download/dit-linux-x86_64 -o dit
-chmod +x dit && sudo mv dit /usr/local/bin/
-```
-
 Every asset ships a `.sha256` sidecar — verify with `shasum -a 256 -c dit-<asset>.sha256`.
 
 > [!NOTE]
-> **Distro-portable by design.** The default Linux `x86_64`/`aarch64`/`armv7` binaries are built
-> with [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) against an **old glibc floor
-> (2.28)**, so a *single* binary runs on every Ubuntu since 18.04 (20.04 / 22.04 / 24.04 / 26.04) and
-> Debian 10+ — no more "version `GLIBC_2.39' not found" when you move between releases. If your host
-> glibc is older than 2.28, or you're on a musl distro like Alpine, grab the `*-static` variant
-> instead (ALSA is linked in, so it needs nothing on the system). The install script and `dit update`
-> detect this and pick the right one for you automatically.
+> **Distro-portable by design.** The default Linux binaries target glibc ≥ 2.28 (Ubuntu 18.04+, Debian 10+). For older or musl hosts, use the `*-static` variant (ALSA linked in, no system deps).
 
 > [!NOTE]
-> **Dependencies — there's essentially one, and the installer handles it.** The prebuilt Linux
-> binary is self-contained: its *only* runtime dependency is the ALSA shared library `libasound2`
-> (audio) — no `libxdo`, `wl-clipboard`, GTK or appindicator (input, clipboard and the tray are all
-> pure-Rust). The install script checks for it and offers to install it via your package manager
-> (`apt`/`dnf`/`pacman`/`zypper`); with `--yes` it just does it. The `*-static` build links ALSA in,
-> so it needs **nothing at all** — use it (or `--static`) if you'd rather not touch system packages.
-> `libasound2-dev` and `pkg-config` are only needed to *compile from source*, never to run a release.
-> macOS and Windows need nothing extra.
+> **Dependencies on Linux.** The headless dictation binary's only runtime dep is `libasound2`. The settings GUI (`dit settings`) additionally needs `libGL` and `libxkbcommon` — the installer offers to add them.
 
 ### Build from source
 
 ```bash
-cargo install --path .          # or: cargo build --release
+cargo build --release                        # cloud-only (lean)
+cargo build --release --features local       # add local Whisper engine
+cargo build --release --features gui         # add settings GUI
+cargo build --release --features local,gui   # everything (release default)
 ```
 
 <details>
@@ -143,179 +107,220 @@ cargo install --path .          # or: cargo build --release
 
 ```bash
 sudo apt-get install -y libasound2-dev pkg-config
+# for --features gui:
+sudo apt-get install -y libxkbcommon-dev libgl1-mesa-dev
 ```
-
-(That's the only build dependency — the Linux input, clipboard and tray are all
-pure-Rust, so no X11/GTK/xdo/appindicator dev packages are needed.)
-
-macOS and Windows need no extra system packages.
 </details>
 
 ---
 
 ## Configure
 
-Put your ElevenLabs API key in `~/.dit.env`:
+### Cloud engine (ElevenLabs API key)
 
 ```bash
 echo 'ELEVENLABS_API_KEY=sk_your_key_here' > ~/.dit.env
 ```
 
-(or export `ELEVENLABS_API_KEY`, or pass `--env-file <path>`).
+Or use the settings GUI: `dit settings` → Account tab.
+
+### Persistent config (`~/.dit/config.toml`)
+
+All CLI flags can be persisted:
+
+```toml
+language = "pt"
+engine = "cloud"
+mode = "toggle"
+hotkey = "F9"
+no_filler = false
+```
+
+`dit settings` reads and writes this file. CLI flags always override it.
 
 ---
 
 ## Use
 
 ```bash
-dit                              # F9 toggle, Portuguese
-dit --language en                # English
-dit --hotkey F8                  # any of F1..F12
-dit --device "Fifine"            # prefer an input device by name substring
-dit --no-filler                  # strip "uh"/"um" from the output
-dit --keyterm RedDB --keyterm Scribe   # bias toward names/jargon (repeatable)
-dit --vad-silence 0.8            # commit faster on shorter pauses
-dit --region eu                  # EU data residency
-dit --list-devices               # list inputs and exit
-dit doctor                       # diagnose mic/keyboard/session permissions
-dit update                       # update to the latest release (no-op if current)
-dit update --check               # only report whether an update is available
+dit                                   # cloud engine, F9 toggle, Portuguese
+dit --engine local                    # offline Whisper engine
+dit --engine local --mode hold        # hold key to record, release to transcribe
+dit --language en                     # English
+dit --language auto                   # auto-detect spoken language
+dit --hotkey RightAlt                 # single modifier key as hotkey
+dit --hotkey "RightCtrl+F9"           # key combo
+dit --hotkey F8                       # any F1..F12
+dit --device "Fifine"                 # prefer an input device by name substring
+dit --no-filler                       # strip "uh"/"um" from output
+dit --keyterm RedDB --keyterm Scribe  # bias toward names/jargon (cloud, repeatable)
+dit --vad-silence 0.8                 # commit faster on shorter pauses (cloud)
+dit --region eu                       # EU data residency (cloud)
+dit --list-devices                    # list inputs and exit
+dit doctor                            # diagnose mic/keyboard/session permissions
+dit settings                          # open the settings GUI
+dit update                            # update to the latest release
+dit update --check                    # only report whether an update is available
 ```
 
-Press **F9** → speak → press **F9** again. While recording, the tray icon becomes a high-contrast **VU meter**: dark red bars mean silence/no input, green bars mean healthy speech level, and yellow/red bars mean loud input. `Ctrl+C` quits. Crank up logs with `RUST_LOG=dit=debug`.
+While recording, the tray icon becomes a **VU meter**: red bars = silence, green = healthy speech, yellow/red = loud input. `Ctrl+C` quits.
+
+### Recording modes
+
+| Mode | Behaviour |
+|---|---|
+| `--mode toggle` (default) | Press once to start, press again to stop |
+| `--mode hold` | Hold the key to record, release to transcribe |
+
+### Hotkeys
+
+Any key combo works, not just F-keys:
+
+```bash
+dit --hotkey F9              # classic
+dit --hotkey RightAlt        # single modifier
+dit --hotkey RightCtrl       # single modifier
+dit --hotkey "RightAlt+F9"   # combo
+```
+
+> [!NOTE]
+> `Fn` is not capturable on most platforms — use a regular key or modifier instead.
+
+### Flag reference
 
 | Flag | Default | Description |
 |---|---|---|
-| `--language` | `pt` | Scribe language code (`pt`, `en`, `es`, …) |
-| `--model` | `scribe_v2_realtime` | Scribe realtime model id |
-| `--hotkey` | `F9` | Toggle key (`F1`..`F12`) |
+| `--engine` | `cloud` | `cloud` or `local` |
+| `--mode` | `toggle` | `toggle` or `hold` |
+| `--language` | `pt` | Language code, or `auto` for auto-detection |
+| `--model` | `scribe_v2_realtime` | Scribe model (cloud) or Whisper model name (local) |
+| `--hotkey` | `F9` | Toggle/hold key — F1..F12, modifier keys, or combos |
 | `--device` | *system default* | Input device name substring |
 | `--no-filler` | off | Remove filler words (`no_verbatim`) |
-| `--keyterm <TERM>` | — | Bias the model toward a term; repeatable |
-| `--vad-silence <SECS>` | `1.5` | Silence before a segment commits — lower = snappier |
-| `--region` | `global` | API region: `global`, `us`, `eu`, `in` |
-| `--no-preview` | off | Disable the live terminal preview |
+| `--keyterm <TERM>` | — | Bias toward a term; repeatable (cloud only) |
+| `--vad-silence <SECS>` | `1.5` | Silence before segment commits (cloud only) |
+| `--region` | `global` | API region: `global`, `us`, `eu`, `in` (cloud only) |
+| `--no-preview` | off | Disable live terminal preview |
 | `--paste-shift` | off | Linux: paste with `Ctrl+Shift+V` (for terminals) |
-| `--type` | off | Linux: type the transcript via uinput instead of pasting (clipboard fallback for accents/emoji) |
-| `--env-file` | `~/.dit.env` | Path to the key file |
+| `--type` | off | Linux: type via uinput instead of clipboard |
+| `--env-file` | `~/.dit.env` | Path to the API key file |
 | `--list-devices` | — | Print input devices and exit |
 
-`dit` is resilient to desktop hardware churn: on Linux it monitors `/dev/input`
-for keyboards plugged in after startup, debounces duplicate hotkey events from
-multi-event keyboards, ranks real capture devices ahead of noisy ALSA aliases,
-and retries/fails over if a microphone stream disappears.
+---
 
-> [!TIP]
-> For the sharpest transcripts: pass names and jargon with `--keyterm` (e.g. `--keyterm Kubernetes`),
-> turn on `--no-filler` for clean prose, and lower `--vad-silence` (e.g. `0.8`) if you want each
-> sentence to land sooner at the cost of slightly more fragmentation.
+## Local engine & model management
+
+The local engine runs Whisper inference fully on-device — no internet, no API key, no per-use cost.
+
+```bash
+# Manage models
+dit models list                    # show available models and which are installed
+dit models download base           # download the "base" Whisper model (~145 MB)
+dit models download small          # download "small" (~488 MB)
+dit models path                    # print the models directory (~/.dit/models/)
+dit models rm base                 # delete a downloaded model
+
+# Use a specific model
+dit --engine local --model base    # use the base model
+dit --engine local --model small   # use the small model
+```
+
+Models are downloaded from HuggingFace, verified by SHA-256, and stored in `~/.dit/models/`. The Models tab in `dit settings` also lets you manage them visually.
+
+Available models: `tiny`, `base`, `small`, `medium`, `large-v2`, `large-v3`.
+
+---
+
+## Settings GUI
+
+```bash
+dit settings     # open the settings window
+```
+
+| Tab | Contents |
+|---|---|
+| **General** | Language, hotkey, recording mode, engine |
+| **Audio** | Input device picker + live VU meter |
+| **Models** | Download and manage local Whisper models |
+| **Account** | ElevenLabs API key |
+| **About** | Version info |
+
+All settings persist to `~/.dit/config.toml` and are shared with the CLI. The tray's **Settings…** menu item also opens this window.
+
+---
+
+## File transcription
+
+Transcribe existing audio files with either engine:
+
+```bash
+dit transcribe meeting.wav                         # cloud engine, stdout
+dit transcribe --engine local interview.mp3        # local Whisper, stdout
+dit transcribe lecture.flac --output lecture.txt   # write to file
+dit transcribe --engine local *.wav                # batch, multiple files
+```
+
+Supported formats: `wav`, `mp3`, `flac`, `m4a`.
+
+---
+
+## Tray controls
+
+The system tray provides runtime controls without restarting:
+
+- **Switch input device** — submenu with all detected mics
+- **Switch language** — change on the fly
+- **Switch engine** — cloud ↔ local
+- **Switch mode** — toggle ↔ hold
+- **Settings…** — open the settings GUI
+- **Open last transcript** — opens the most recent session log
+- **Pause** — temporarily disable the hotkey
+
+---
+
+## Nothing gets lost
+
+- **Live terminal preview** — unstable partials appear on a self-rewriting line; only finalized text is typed into the focused app.
+- **Session logs** — every committed segment is appended to `~/.dit/sessions/session-<ts>.txt`. Logs are pruned automatically (last 30 days / 100 sessions).
 
 ---
 
 ## Run it always (autostart)
 
-`dit` is a long-running process — it has to be, since *something* must listen for the hotkey. To
-have it start at login and stay ready, install it as a **user service**:
-
 ```bash
 dit service install                     # autostart with defaults
-dit service install --language en --no-filler   # …or bake in your flags
+dit service install --language en --no-filler   # bake in your flags
 dit service status
 dit service uninstall
 ```
 
 | OS | What it installs |
 |---|---|
-| **Linux** | a systemd `--user` service (`journalctl --user -u dit -f` for logs), or an XDG autostart `.desktop` entry if there's no user systemd |
-| **macOS** | a LaunchAgent in `~/Library/LaunchAgents` |
-| **Windows** | a logon task via Task Scheduler |
+| **Linux** | systemd `--user` service (`journalctl --user -u dit -f`) or XDG autostart |
+| **macOS** | LaunchAgent in `~/Library/LaunchAgents` |
+| **Windows** | Task Scheduler logon task |
 
 > [!IMPORTANT]
-> It installs a **user-session agent**, not a root/system daemon — and that's deliberate. A system
-> service runs isolated from your login session (no display, no audio, no input access on Linux; in
-> "session 0" with no desktop on Windows), so it physically *couldn't* read your keyboard or type
-> into your apps. `dit` must live inside your graphical session.
-
----
-
-## Nothing gets lost
-
-Two surfaces keep your words safe without ever risking the focused app's text:
-
-- **Live terminal preview** — the unstable `partial_transcript` "materializes" on a
-  single, self-rewriting line in your terminal. You watch the sentence form in real time,
-  but the app in focus **only ever receives committed (finalized) text**. No backspace-and-
-  retype into a window we don't control, so there's no way to clobber what's already there.
-- **Append-only transcript log** — every committed segment is written to
-  `~/.dit/sessions/session-<ts>.txt`. If typing fails, the app loses focus, or the
-  connection drops, the text is still on disk. A previewed tail that never got a final commit
-  is recorded too (marked `# [uncommitted]`) — saved for recovery, **not** typed late.
-
-```
-… materializing this senten     ← live preview (dim, rewrites in place)
-This sentence is now committed.  ← locked in, typed into the app + logged
-```
-
-## How it works
-
-`dit` is faithful to the original script's streaming contract:
-
-- **`partial_transcript`** events are **ignored** — they're an unstable preview, and typing
-  them character-by-character would scramble the output.
-- **`committed_transcript`** events are stable per-segment text, committed by the server's
-  Voice Activity Detection on each pause. Every one is **typed into the focused app immediately**.
-- Identical consecutive segments are **de-duplicated** so nothing lands twice.
-- On stop, an empty `commit: true` frame **flushes the last open segment**.
-- While audio is streaming, `dit` computes a lightweight RMS level locally and updates the tray icon
-  about 5 times per second as a chunky 5-bar meter. Only the level is used for the icon; no audio is
-  written to disk by default.
-
-Text delivery is platform-specific. On Linux/Wayland, `dit` sets the clipboard and emits the paste
-chord through `/dev/uinput` (`Ctrl+V`, or `Ctrl+Shift+V` with `--paste-shift` for terminals); this
-makes delivery much more reliable than trying to synthesize every character individually. The text is
-also appended to the session log, so a failed paste can still be recovered.
-
-| Concern | Crate | Replaces (`whisperflow.py`) |
-|---|---|---|
-| Global hotkey | [`rdev`](https://crates.io/crates/rdev) | `evdev` + `input` group |
-| Audio capture | [`cpal`](https://crates.io/crates/cpal) | `parec` (PulseAudio) |
-| WebSocket | [`tokio-tungstenite`](https://crates.io/crates/tokio-tungstenite) | `websockets` |
-| Text injection | [`enigo`](https://crates.io/crates/enigo) | `wl-copy` + `ydotool key ctrl+v` |
-| Notifications | [`notify-rust`](https://crates.io/crates/notify-rust) | `notify-send` |
+> It installs a **user-session agent**, not a root/system daemon — `dit` must live inside your graphical session to access the keyboard, audio, and display.
 
 ---
 
 ## Platform notes
 
 > [!IMPORTANT]
-> **Linux** — dit uses a kernel-level input backend (works the same on **X11 and Wayland**, since
-> X11 global grabs and X11 input don't reach native Wayland apps): it reads the hotkey from
-> `/dev/input` (evdev) and types by setting the clipboard and emitting the paste chord through
-> `/dev/uinput`. No external libraries or tools — but it needs a one-time permission setup, which the
-> installer offers to do:
+> **Linux** — dit uses a kernel-level input backend (evdev + uinput), works on both X11 and Wayland. One-time setup:
 >
 > ```bash
-> sudo usermod -aG input $USER          # read the keyboard
+> sudo usermod -aG input $USER
 > echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' | sudo tee /etc/udev/rules.d/99-uinput.rules
-> sudo udevadm control --reload && sudo udevadm trigger   # write to uinput
-> # then log out and back in
+> sudo udevadm control --reload && sudo udevadm trigger
+> # log out and back in
 > ```
 >
-> In a terminal, paste is `Ctrl+Shift+V` — pass `--paste-shift` so dit uses that chord.
->
-> **Paste interpreted as an image (GNOME/Wayland):** terminal TUIs (Claude Code, Codex, opencode)
-> inspect the clipboard's MIME targets on paste, and on GNOME/Wayland Mutter's X11↔Wayland clipboard
-> bridge can intermittently leave a stale `image/*` target live (after a recent screenshot copy), so
-> the transcript gets attached as an image. dit mitigates this by re-verifying and re-setting the
-> clipboard with a longer settle before pasting. To bypass the clipboard entirely, pass `--type`:
-> dit then *types* the transcript through the virtual keyboard, falling back to the clipboard only for
-> characters the layout can't type (accents like `ç`/`ã`, symbols, emoji). Fully-typeable text never
-> touches the clipboard — so it can't be mis-read as an image and your clipboard isn't clobbered.
-> (`--type` is Linux-only; macOS/Windows already type every character via `enigo`.)
+> In terminals, use `--paste-shift` (`Ctrl+Shift+V`) or `--type` (uinput typing, bypasses clipboard entirely — avoids GNOME/Wayland intermittently interpreting the clipboard as an image after a screenshot copy).
 
 > [!NOTE]
-> **macOS** — grant **Accessibility** permission (System Settings → Privacy & Security →
-> Accessibility) so `dit` can read the hotkey and type into the focused app.
+> **macOS** — grant **Accessibility** permission (System Settings → Privacy & Security → Accessibility).
 >
 > **Windows** — works out of the box.
 
@@ -323,27 +328,11 @@ also appended to the session log, so a failed paste can still be recovered.
 
 ## Releases & CI
 
-Versioning is **commit-driven**. [`release-plz`](https://release-plz.dev) reads the
-[Conventional Commits](https://www.conventionalcommits.org) on `main` and opens a *release PR*
-that bumps the version (`feat` → minor, `fix` → patch, `!`/`BREAKING CHANGE` → major) and updates
-`CHANGELOG.md`. Merging that PR creates the version tag.
-
-The tag triggers the release build on [Blacksmith](https://blacksmith.sh) runners. Linux
-`x86_64`/`aarch64` compile **natively** then get their glibc floor lowered to 2.28 by
-[`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) (so one binary spans every modern
-distro); `armv7` cross-compiles the same way. Two extra **fully-static musl** binaries
-(`*-static`) build inside `messense/rust-musl-cross` containers with a statically-linked ALSA, as a
-fallback for ancient or musl hosts. macOS ships universal coverage, Windows an `.exe`. Every target
-is built `--locked`, stripped, smoke-tested, and published to a GitHub Release with `.sha256`
-sidecars and a [`git-cliff`](https://git-cliff.org) changelog.
+[`release-plz`](https://release-plz.dev) reads [Conventional Commits](https://www.conventionalcommits.org) and opens a release PR that bumps the version (`feat` → minor, `fix` → patch). Merging creates the tag, which triggers the release build on [Blacksmith](https://blacksmith.sh) — all 8 targets, stripped, smoke-tested, published with `.sha256` sidecars and a changelog.
 
 ```
 commits (feat:/fix:/…) ─► release-plz PR ─► merge ─► tag vX.Y.Z ─► binaries + GitHub Release
 ```
-
-So you never tag by hand — just write conventional commits and merge the release PR. **No PAT
-needed:** the tag release-plz creates triggers the build directly (you can also rebuild any tag
-manually with `gh workflow run release.yml -f version=X.Y.Z`).
 
 ---
 
