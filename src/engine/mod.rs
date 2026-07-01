@@ -18,6 +18,11 @@ use crate::IconState;
 pub mod scribe;
 pub use scribe::ScribeEngine;
 
+#[cfg(feature = "local")]
+pub mod local;
+#[cfg(feature = "local")]
+pub use local::LocalEngine;
+
 /// Speech-to-text backend.
 ///
 /// `run_stream` drives live dictation (audio in → text typed in real time).
