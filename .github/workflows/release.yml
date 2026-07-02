@@ -120,10 +120,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev pkg-config
 
+      # Ubuntu's main archive (and the runner's mirror+ sources) only carries
+      # amd64/i386; armhf lives on ports.ubuntu.com. Pin the existing sources to
+      # amd64 and add a ports stanza for armhf before pulling the foreign package.
       - name: Install ALSA dev (armhf cross)
         if: matrix.kind == 'zig' && matrix.arm_cross
         run: |
           sudo dpkg --add-architecture armhf
+          sudo sed -i 's/^Components:/Architectures: amd64\nComponents:/' /etc/apt/sources.list.d/*.sources
+          sudo tee /etc/apt/sources.list.d/armhf-ports.sources >/dev/null <<'EOF'
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: noble noble-updates noble-security
+          Components: main universe
+          Architectures: armhf
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
           sudo apt-get update
           sudo apt-get install -y pkg-config libasound2-dev:armhf
 
@@ -182,8 +194,11 @@ jobs:
               curl -sSL "https://www.alsa-project.org/files/pub/lib/alsa-lib-${ALSA_VER}.tar.bz2" -o /tmp/alsa.tar.bz2
               mkdir -p /tmp/alsa && tar xf /tmp/alsa.tar.bz2 -C /tmp/alsa --strip-components=1
               cd /tmp/alsa
+              # -fPIC: rust links the musl binary as static-PIE, which rejects
+              # non-PIC objects (R_X86_64_32 relocations) in the archive.
               ./configure --host="${MUSL_HOST}" --enable-static --disable-shared \
-                --disable-python --without-debug --prefix=/musl-alsa CC="${TARGET_CC:-${MUSL_HOST}-gcc}"
+                --disable-python --without-debug --prefix=/musl-alsa \
+                CC="${TARGET_CC:-${MUSL_HOST}-gcc}" CFLAGS="-O2 -fPIC"
               make -j"$(nproc)" >/dev/null && make install >/dev/null
               cd /volume
               # The image presets target-scoped PKG_CONFIG_* vars aimed at its own
