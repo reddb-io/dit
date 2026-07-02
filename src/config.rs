@@ -81,7 +81,7 @@ pub struct Hotkey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
     /// ElevenLabs Scribe v2 Realtime — streams audio over a WebSocket (needs API key).
-    Cloud,
+    ElevenLabs,
     /// Offline Whisper via candle — records then transcribes locally (no network, no API key).
     Local,
 }
@@ -90,7 +90,7 @@ impl Engine {
     /// The canonical config-file/CLI token for this engine.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Engine::Cloud => "cloud",
+            Engine::ElevenLabs => "elevenlabs",
             Engine::Local => "local",
         }
     }
@@ -203,9 +203,10 @@ pub struct Cli {
     #[arg(long)]
     pub list_devices: bool,
 
-    /// Transcription engine: `cloud` (ElevenLabs Scribe, needs API key) or
-    /// `local` (offline Whisper via candle, needs a model from `dit models`).
-    #[arg(long, default_value = "cloud")]
+    /// Transcription engine: `elevenlabs` (Scribe v2 Realtime, needs API key;
+    /// `cloud` is accepted as an alias) or `local` (offline Whisper via candle,
+    /// needs a model from `dit models`).
+    #[arg(long, default_value = "elevenlabs")]
     pub engine: String,
 
     /// Keyboard layout for the Linux typing path (`--type`): `auto` (detect
@@ -257,10 +258,11 @@ pub enum Command {
         /// Language code (`pt`, `en`, …) or `auto` for auto-detection.
         #[arg(long, default_value = "pt")]
         language: String,
-        /// Transcription engine: `cloud` (needs API key) or `local` (offline).
-        #[arg(long, default_value = "cloud")]
+        /// Transcription engine: `elevenlabs` (needs API key; `cloud` alias) or
+        /// `local` (offline).
+        #[arg(long, default_value = "elevenlabs")]
         engine: String,
-        /// Model override: a Scribe model id for `cloud`, or a `dit models`
+        /// Model override: a Scribe model id for `elevenlabs`, or a `dit models`
         /// id (e.g. `whisper-base-local`) for `local`.
         #[arg(long)]
         model: Option<String>,
@@ -407,7 +409,7 @@ fn merge(file: SettingsLayer, env: SettingsLayer, cli: SettingsLayer) -> Resolve
             env.session_max_count,
             cli.session_max_count,
         ),
-        engine: pick("cloud".into(), file.engine, env.engine, cli.engine),
+        engine: pick("elevenlabs".into(), file.engine, env.engine, cli.engine),
         layout: pick("auto".into(), file.layout, env.layout, cli.layout),
     }
 }
@@ -541,7 +543,7 @@ impl Config {
             .with_context(|| format!("unsupported engine: {}", settings.engine))?;
 
         let api_key = std::env::var("ELEVENLABS_API_KEY").unwrap_or_default();
-        if api_key.is_empty() && engine == Engine::Cloud {
+        if api_key.is_empty() && engine == Engine::ElevenLabs {
             bail!(
                 "ELEVENLABS_API_KEY is not set. Put it in {} or export it in the environment.",
                 env_path
@@ -747,11 +749,14 @@ pub(crate) fn load_env_file(path: &PathBuf) {
 }
 
 /// Parse the engine name into an [`Engine`].
+///
+/// `cloud` and `scribe` are accepted as aliases for `elevenlabs` so older
+/// configs and muscle memory keep working after the rename.
 pub(crate) fn parse_engine(name: &str) -> Result<Engine> {
     match name.to_ascii_lowercase().as_str() {
-        "cloud" => Ok(Engine::Cloud),
+        "elevenlabs" | "eleven" | "cloud" | "scribe" => Ok(Engine::ElevenLabs),
         "local" => Ok(Engine::Local),
-        other => bail!("engine must be `cloud` or `local`, got {other}"),
+        other => bail!("engine must be `elevenlabs` or `local`, got {other}"),
     }
 }
 
@@ -1176,7 +1181,7 @@ mod tests {
             type_hybrid: false,
             session_max_age_days: DEFAULT_SESSION_MAX_AGE_DAYS,
             session_max_count: DEFAULT_SESSION_MAX_COUNT,
-            engine: Engine::Cloud,
+            engine: Engine::ElevenLabs,
             layout: LayoutSetting::Auto,
         }
     }
