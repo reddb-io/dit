@@ -22,8 +22,9 @@ use evdev::{uinput::VirtualDevice, AttributeSet, EventType, KeyCode, KeyEvent};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{Hotkey, Key, Modifier, RecordingMode};
+use crate::config::{Hotkey, Key, Modifier};
 use crate::inject::InjectMsg;
+use crate::layout::{char_to_key, typing_keycodes, KeyboardLayout};
 use crate::Control;
 
 const HOTKEY_DEBOUNCE: Duration = Duration::from_millis(350);
@@ -147,25 +148,22 @@ fn letter_keycode(c: char) -> Result<KeyCode> {
     })
 }
 
-/// Spawn one reader thread per keyboard; each forwards hotkey events to `tx`.
+/// Spawn one reader thread per keyboard; each forwards raw hotkey presses and
+/// releases to `tx` as [`Control::KeyDown`] / [`Control::KeyUp`].
 ///
-/// In `Toggle` mode (the default) only key-press events (`value == 1`) are
-/// forwarded as [`Control::Toggle`]. Autorepeat (`value == 2`) and release
-/// (`value == 0`) are ignored, matching the original behaviour.
-///
-/// In `Hold` mode a key-press sends [`Control::KeyDown`] (start recording) and
-/// a key-release sends [`Control::KeyUp`] (stop recording). Autorepeat is still
-/// ignored. The debounce window guards against OS-level duplicate press events;
-/// release events are never debounced so the stop is always delivered.
+/// The readers don't interpret toggle-vs-hold — the session manager does,
+/// against the *live* recording mode, so the tray can switch modes at runtime.
+/// Presses are debounced against OS-level duplicates; releases never are, so a
+/// hold-mode stop is always delivered. Autorepeat (`value == 2`) is ignored.
 ///
 /// The device set is re-scanned forever so USB/Bluetooth keyboards that appear
 /// after `dit` starts are picked up automatically. Dead readers unregister their
 /// path so the monitor can attach again if the kernel reuses the event node.
-pub fn spawn_hotkey(binding: EvdevBinding, tx: UnboundedSender<Control>, mode: RecordingMode) -> Result<()> {
+pub fn spawn_hotkey(binding: EvdevBinding, tx: UnboundedSender<Control>) -> Result<()> {
     let binding = Arc::new(binding);
     let active = Arc::new(Mutex::new(HashSet::<PathBuf>::new()));
     let debouncer = Arc::new(HotkeyDebouncer::default());
-    let found = scan_keyboards(&binding, mode, &tx, &active, &debouncer);
+    let found = scan_keyboards(&binding, &tx, &active, &debouncer);
 
     if found == 0 && !Path::new("/dev/input").exists() {
         bail!(
@@ -181,7 +179,7 @@ pub fn spawn_hotkey(binding: EvdevBinding, tx: UnboundedSender<Control>, mode: R
 
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(2));
-        let newly_found = scan_keyboards(&binding, mode, &tx, &active, &debouncer);
+        let newly_found = scan_keyboards(&binding, &tx, &active, &debouncer);
         if newly_found > 0 {
             info!("attached hotkey listener to {newly_found} new keyboard(s)");
         }
@@ -191,7 +189,6 @@ pub fn spawn_hotkey(binding: EvdevBinding, tx: UnboundedSender<Control>, mode: R
 
 fn scan_keyboards(
     binding: &Arc<EvdevBinding>,
-    mode: RecordingMode,
     tx: &UnboundedSender<Control>,
     active: &Arc<Mutex<HashSet<PathBuf>>>,
     debouncer: &Arc<HotkeyDebouncer>,
@@ -212,7 +209,7 @@ fn scan_keyboards(
         let active = active.clone();
         let debouncer = debouncer.clone();
         let binding = binding.clone();
-        std::thread::spawn(move || run_keyboard_reader(path, dev, binding, mode, tx, active, debouncer));
+        std::thread::spawn(move || run_keyboard_reader(path, dev, binding, tx, active, debouncer));
     }
     found
 }
@@ -239,7 +236,6 @@ fn run_keyboard_reader(
     path: PathBuf,
     mut dev: evdev::Device,
     binding: Arc<EvdevBinding>,
-    mode: RecordingMode,
     tx: UnboundedSender<Control>,
     active: Arc<Mutex<HashSet<PathBuf>>>,
     debouncer: Arc<HotkeyDebouncer>,
@@ -259,35 +255,26 @@ fn run_keyboard_reader(
                     // Track modifier press/release so a combo can check what's held.
                     if modifier_codes.contains(&ev.code()) {
                         match ev.value() {
-                            0 => { held.remove(&ev.code()); }
-                            1 => { held.insert(ev.code()); }
+                            0 => {
+                                held.remove(&ev.code());
+                            }
+                            1 => {
+                                held.insert(ev.code());
+                            }
                             _ => {}
                         }
                     }
                     if ev.code() == binding.trigger && modifiers_satisfied(&binding, &held) {
-                        match mode {
-                            RecordingMode::Toggle => {
-                                if ev.value() == 1 {
-                                    if debouncer.should_fire(Instant::now()) {
-                                        let _ = tx.send(Control::Toggle);
-                                    } else {
-                                        debug!("ignored duplicate hotkey event within debounce window");
-                                    }
-                                }
+                        if ev.value() == 1 {
+                            if debouncer.should_fire(Instant::now()) {
+                                let _ = tx.send(Control::KeyDown);
+                            } else {
+                                debug!("ignored duplicate hotkey press within debounce window");
                             }
-                            RecordingMode::Hold => {
-                                if ev.value() == 1 {
-                                    if debouncer.should_fire(Instant::now()) {
-                                        let _ = tx.send(Control::KeyDown);
-                                    } else {
-                                        debug!("hold: ignored duplicate key-down within debounce window");
-                                    }
-                                } else if ev.value() == 0 {
-                                    let _ = tx.send(Control::KeyUp);
-                                }
-                                // autorepeat (value == 2) always ignored
-                            }
+                        } else if ev.value() == 0 {
+                            let _ = tx.send(Control::KeyUp);
                         }
+                        // autorepeat (value == 2) always ignored
                     }
                 }
             }
@@ -309,12 +296,17 @@ fn run_keyboard_reader(
 /// Drive the injector backend on a dedicated thread (called from `inject.rs`).
 ///
 /// `shift` selects Ctrl+Shift+V over Ctrl+V for the clipboard paste chord.
-/// `type_hybrid` opts into the typing-first delivery path: characters the
-/// active layout can produce are injected as keystrokes via `/dev/uinput`, and
-/// only the characters it can't type (accents/symbols/emoji) fall back to the
+/// `type_hybrid` opts into the typing-first delivery path: characters `layout`
+/// can produce are injected as keystrokes via `/dev/uinput`, and only the
+/// characters it can't type (dead-key accents/symbols/emoji) fall back to the
 /// clipboard — so most deliveries never touch the clipboard at all.
-pub fn run_injector(rx: Receiver<InjectMsg>, shift: bool, type_hybrid: bool) {
-    let mut paster = match Paster::new(shift, type_hybrid) {
+pub fn run_injector(
+    rx: Receiver<InjectMsg>,
+    shift: bool,
+    type_hybrid: bool,
+    layout: KeyboardLayout,
+) {
+    let mut paster = match Paster::new(shift, type_hybrid, layout) {
         Ok(p) => p,
         Err(e) => {
             error!("{e:#}");
@@ -340,15 +332,14 @@ pub fn run_injector(rx: Receiver<InjectMsg>, shift: bool, type_hybrid: bool) {
     }
 }
 
-/// How long to let the compositor's X11↔Wayland clipboard bridge settle after a
-/// `set_text` before reading it back (mitigation B). The previous 40 ms was too
-/// short for Mutter's bridge on GNOME/Wayland — when a native image was the last
-/// clipboard owner, the `image/*` target could still be live when the receiving
-/// app reads, so the transcript was attached as an image. A longer settle plus a
-/// verified re-set shrinks that race window.
+/// How long to let the compositor's X11↔Wayland clipboard bridge settle after
+/// a `set_text` before reading it back. Mutter's bridge on GNOME/Wayland needs
+/// this: when a native image was the last clipboard owner, the `image/*`
+/// target can still be live when the receiving app reads, attaching the
+/// transcript as an image. The settle plus a verified re-set closes that race.
 const CLIPBOARD_SETTLE: Duration = Duration::from_millis(120);
 /// How many times to set + verify the clipboard before giving up and emitting
-/// the paste chord anyway (mitigation B).
+/// the paste chord anyway.
 const CLIPBOARD_SET_ATTEMPTS: usize = 3;
 
 /// Clipboard (arboard) + a `/dev/uinput` virtual keyboard. Depending on the
@@ -362,10 +353,12 @@ struct Paster {
     /// When true, deliver by typing (uinput) with a clipboard fallback for
     /// characters the active layout can't type; otherwise paste via clipboard.
     type_hybrid: bool,
+    /// The keyboard layout whose char → keycode map the typing path uses.
+    layout: KeyboardLayout,
 }
 
 impl Paster {
-    fn new(shift: bool, type_hybrid: bool) -> Result<Self> {
+    fn new(shift: bool, type_hybrid: bool, layout: KeyboardLayout) -> Result<Self> {
         let clipboard = arboard::Clipboard::new().context("clipboard unavailable")?;
 
         let mut keys = AttributeSet::<KeyCode>::new();
@@ -375,7 +368,7 @@ impl Paster {
         // The typing path can emit any key the layout map produces, so the
         // virtual device must advertise all of them up front.
         if type_hybrid {
-            for key in typing_keycodes() {
+            for key in typing_keycodes(layout) {
                 keys.insert(key);
             }
         }
@@ -398,6 +391,7 @@ impl Paster {
             clipboard,
             shift,
             type_hybrid,
+            layout,
         })
     }
 
@@ -411,19 +405,19 @@ impl Paster {
     }
 
     /// Default path: set the clipboard (verified, with a settle to let the
-    /// X11↔Wayland bridge sync) and emit the paste chord. Mitigation B.
+    /// X11↔Wayland bridge sync) and emit the paste chord.
     fn paste(&mut self, text: &str) -> Result<()> {
         self.set_clipboard_verified(text)?;
         self.emit_paste()
     }
 
-    /// Hybrid typing path (mitigation C). Walk the text in runs: type the runs
-    /// the layout can produce as keystrokes, and only for runs of characters it
-    /// can't type (accents/symbols/emoji) fall back to the clipboard. When the
+    /// Hybrid typing path. Walk the text in runs: type the runs the layout can
+    /// produce as keystrokes, and only for runs of characters it can't type
+    /// (dead-key accents/symbols/emoji) fall back to the clipboard. When the
     /// whole text is typeable the clipboard is never touched — so it is not
     /// clobbered and the Wayland image-paste bug cannot occur.
     fn deliver_typed(&mut self, text: &str) -> Result<()> {
-        let segments = plan_segments(text);
+        let segments = plan_segments(text, self.layout);
         let needs_clipboard = segments.iter().any(|s| matches!(s, Segment::Paste(_)));
         // Best-effort: only when a fallback is unavoidable do we save the user's
         // clipboard so we can restore it afterwards.
@@ -437,8 +431,8 @@ impl Paster {
             match segment {
                 Segment::Type(run) => {
                     for c in run.chars() {
-                        let (key, shift) =
-                            char_to_key(c).expect("planner only emits typeable chars in Type runs");
+                        let (key, shift) = char_to_key(self.layout, c)
+                            .expect("planner only emits typeable chars in Type runs");
                         self.emit_char(key, shift)?;
                     }
                 }
@@ -545,16 +539,14 @@ impl Paster {
     }
 }
 
-// ── Hybrid typing: layout map + delivery planning (mitigation C) ─────────────
+// ── Hybrid typing: delivery planning ──────────────────────────────────────────
 //
 // The clipboard path is Unicode/layout-proof but rides the clipboard, which is
 // exactly what triggers the Wayland image-paste bug. The typing path injects
-// characters directly through `/dev/uinput`. uinput speaks *keycodes*, not
-// characters, so the mapping below assumes a US/ASCII layout — the common case,
-// and the one whose symbols line up with `evdev`'s key names. Anything the map
-// can't produce (accents like `ç`/`ã`/`é`, other scripts, emoji) returns `None`
-// and rides the clipboard fallback, so Portuguese dictation never loses an
-// accent even though the bulk of the text avoids the clipboard entirely.
+// characters directly through `/dev/uinput` using the char → keycode map for
+// the active layout (see [`crate::layout`]). Anything the map can't produce
+// returns `None` and rides the clipboard fallback, so dictation never loses a
+// character even though the bulk of the text avoids the clipboard entirely.
 
 /// One contiguous run of the transcript, tagged by how it will be delivered.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -568,10 +560,10 @@ enum Segment {
 /// Split `text` into alternating typeable / untypeable runs, preserving order.
 /// Consecutive characters of the same kind are coalesced so the typing path
 /// emits as few clipboard fallbacks as possible.
-fn plan_segments(text: &str) -> Vec<Segment> {
+fn plan_segments(text: &str, layout: KeyboardLayout) -> Vec<Segment> {
     let mut segments: Vec<Segment> = Vec::new();
     for c in text.chars() {
-        let typeable = char_to_key(c).is_some();
+        let typeable = char_to_key(layout, c).is_some();
         match segments.last_mut() {
             Some(Segment::Type(run)) if typeable => run.push(c),
             Some(Segment::Paste(run)) if !typeable => run.push(c),
@@ -583,86 +575,6 @@ fn plan_segments(text: &str) -> Vec<Segment> {
         }
     }
     segments
-}
-
-/// Map a character to the key (and whether Shift is held) that produces it on a
-/// US/ASCII layout, or `None` if the layout can't type it. `None` characters
-/// ride the clipboard fallback.
-fn char_to_key(c: char) -> Option<(KeyCode, bool)> {
-    use KeyCode as K;
-    let unshifted = |k: KeyCode| Some((k, false));
-    let shifted = |k: KeyCode| Some((k, true));
-    Some(match c {
-        'a'..='z' => return unshifted(letter_keycode(c.to_ascii_uppercase()).ok()?),
-        'A'..='Z' => return shifted(letter_keycode(c).ok()?),
-        ' ' => (K::KEY_SPACE, false),
-        '\n' => (K::KEY_ENTER, false),
-        '\t' => (K::KEY_TAB, false),
-        '1' => (K::KEY_1, false),
-        '2' => (K::KEY_2, false),
-        '3' => (K::KEY_3, false),
-        '4' => (K::KEY_4, false),
-        '5' => (K::KEY_5, false),
-        '6' => (K::KEY_6, false),
-        '7' => (K::KEY_7, false),
-        '8' => (K::KEY_8, false),
-        '9' => (K::KEY_9, false),
-        '0' => (K::KEY_0, false),
-        '!' => (K::KEY_1, true),
-        '@' => (K::KEY_2, true),
-        '#' => (K::KEY_3, true),
-        '$' => (K::KEY_4, true),
-        '%' => (K::KEY_5, true),
-        '^' => (K::KEY_6, true),
-        '&' => (K::KEY_7, true),
-        '*' => (K::KEY_8, true),
-        '(' => (K::KEY_9, true),
-        ')' => (K::KEY_0, true),
-        '-' => (K::KEY_MINUS, false),
-        '_' => (K::KEY_MINUS, true),
-        '=' => (K::KEY_EQUAL, false),
-        '+' => (K::KEY_EQUAL, true),
-        '[' => (K::KEY_LEFTBRACE, false),
-        '{' => (K::KEY_LEFTBRACE, true),
-        ']' => (K::KEY_RIGHTBRACE, false),
-        '}' => (K::KEY_RIGHTBRACE, true),
-        '\\' => (K::KEY_BACKSLASH, false),
-        '|' => (K::KEY_BACKSLASH, true),
-        ';' => (K::KEY_SEMICOLON, false),
-        ':' => (K::KEY_SEMICOLON, true),
-        '\'' => (K::KEY_APOSTROPHE, false),
-        '"' => (K::KEY_APOSTROPHE, true),
-        '`' => (K::KEY_GRAVE, false),
-        '~' => (K::KEY_GRAVE, true),
-        ',' => (K::KEY_COMMA, false),
-        '<' => (K::KEY_COMMA, true),
-        '.' => (K::KEY_DOT, false),
-        '>' => (K::KEY_DOT, true),
-        '/' => (K::KEY_SLASH, false),
-        '?' => (K::KEY_SLASH, true),
-        _ => return None,
-    })
-}
-
-/// Every key the layout map can emit, so [`Paster::new`] can advertise them on
-/// the virtual device. Derived by probing the map over the printable ASCII
-/// range plus the whitespace keys it supports.
-fn typing_keycodes() -> Vec<KeyCode> {
-    let mut keys: Vec<KeyCode> = Vec::new();
-    let mut push = |k: KeyCode| {
-        if !keys.contains(&k) {
-            keys.push(k);
-        }
-    };
-    push(KeyCode::KEY_LEFTSHIFT);
-    for byte in 0x20u8..=0x7e {
-        if let Some((k, _)) = char_to_key(byte as char) {
-            push(k);
-        }
-    }
-    push(KeyCode::KEY_ENTER);
-    push(KeyCode::KEY_TAB);
-    keys
 }
 
 #[cfg(test)]
@@ -727,68 +639,42 @@ mod tests {
     }
 
     #[test]
-    fn char_to_key_maps_ascii_and_rejects_unicode() {
-        // Lower/upper letters share a key; case is the Shift bit.
-        assert_eq!(char_to_key('a'), Some((KeyCode::KEY_A, false)));
-        assert_eq!(char_to_key('A'), Some((KeyCode::KEY_A, true)));
-        // Digits unshifted, their row symbols shifted on the same key.
-        assert_eq!(char_to_key('1'), Some((KeyCode::KEY_1, false)));
-        assert_eq!(char_to_key('!'), Some((KeyCode::KEY_1, true)));
-        // Whitespace the layout can type.
-        assert_eq!(char_to_key(' '), Some((KeyCode::KEY_SPACE, false)));
-        assert_eq!(char_to_key('\n'), Some((KeyCode::KEY_ENTER, false)));
-        // Portuguese accents and emoji are not typeable → clipboard fallback.
-        assert_eq!(char_to_key('ç'), None);
-        assert_eq!(char_to_key('ã'), None);
-        assert_eq!(char_to_key('é'), None);
-        assert_eq!(char_to_key('🙂'), None);
-    }
-
-    #[test]
     fn plan_segments_splits_typeable_from_fallback_runs() {
         // Pure ASCII never needs the clipboard.
         assert_eq!(
-            plan_segments("ok let's go"),
+            plan_segments("ok let's go", KeyboardLayout::Us),
             vec![Segment::Type("ok let's go".to_string())]
         );
-        // Accents coalesce into one Paste run; the ASCII around them is typed:
-        // "informa" typed, "çã" pasted, "o" typed.
+        // On US, accents coalesce into one Paste run; the ASCII around them is
+        // typed: "informa" typed, "çã" pasted, "o" typed.
         assert_eq!(
-            plan_segments("informação"),
+            plan_segments("informação", KeyboardLayout::Us),
             vec![
                 Segment::Type("informa".to_string()),
                 Segment::Paste("çã".to_string()),
                 Segment::Type("o".to_string()),
             ]
         );
+        // On ABNT2 the ç is a real key — only the ã needs the clipboard.
+        assert_eq!(
+            plan_segments("informação", KeyboardLayout::Abnt2),
+            vec![
+                Segment::Type("informaç".to_string()),
+                Segment::Paste("ã".to_string()),
+                Segment::Type("o".to_string()),
+            ]
+        );
         // Empty text yields no work.
-        assert!(plan_segments("").is_empty());
+        assert!(plan_segments("", KeyboardLayout::Us).is_empty());
     }
 
     #[test]
     fn fully_typeable_text_needs_no_clipboard() {
         // The headline property: typeable transcripts never touch the clipboard,
         // so they can't trigger the Wayland image-paste bug nor clobber it.
-        let segments = plan_segments("the quick brown fox: jumps! (123)");
-        assert!(segments.iter().all(|s| matches!(s, Segment::Type(_))));
-    }
-
-    #[test]
-    fn typing_keycodes_advertises_the_keys_the_map_emits() {
-        let keys = typing_keycodes();
-        // A sampling of keys the map can produce must be advertised.
-        for k in [
-            KeyCode::KEY_A,
-            KeyCode::KEY_Z,
-            KeyCode::KEY_1,
-            KeyCode::KEY_SPACE,
-            KeyCode::KEY_MINUS,
-            KeyCode::KEY_SLASH,
-            KeyCode::KEY_LEFTSHIFT,
-            KeyCode::KEY_ENTER,
-            KeyCode::KEY_TAB,
-        ] {
-            assert!(keys.contains(&k), "missing {k:?} from typing keyset");
+        for layout in [KeyboardLayout::Us, KeyboardLayout::Abnt2] {
+            let segments = plan_segments("the quick brown fox: jumps! (123)", layout);
+            assert!(segments.iter().all(|s| matches!(s, Segment::Type(_))));
         }
     }
 

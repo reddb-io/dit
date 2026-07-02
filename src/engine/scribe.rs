@@ -24,7 +24,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::{ClientRequestBuilder, Message};
 use tracing::{debug, info, warn};
 
-use crate::audio::{CaptureEvent, Resampler};
+use crate::audio::{drain_capture, AudioLevel, CaptureEvent, Resampler};
 use crate::config::{Config, CHUNK_MS, FINAL_WAIT_SECS, SAMPLE_RATE};
 use crate::engine::Transcriber;
 use crate::inject::Injector;
@@ -207,18 +207,7 @@ impl Transcriber for ScribeEngine {
         audio_stop.store(true, Ordering::Relaxed);
 
         // Drain whatever audio is still buffered in the channel.
-        while let Ok(Some(event)) = timeout(Duration::from_millis(50), audio.recv()).await {
-            match event {
-                CaptureEvent::Format { sample_rate } => {
-                    resampler = Resampler::new(sample_rate, SAMPLE_RATE);
-                }
-                CaptureEvent::Samples(frame) => {
-                    sample_events += 1;
-                    level.add(&frame);
-                    resampler.push(&frame, &mut buf);
-                }
-            }
-        }
+        drain_capture(&mut audio, &mut resampler, &mut buf).await;
         sent_bytes += flush_chunks(&mut write, &mut buf, 1).await?; // flush remainder
         info!(
             "audio sent: {:.1}s ({sent_bytes} bytes pcm16 @ {SAMPLE_RATE} Hz, {sample_events} sample callbacks)",
@@ -297,21 +286,14 @@ impl Transcriber for ScribeEngine {
                             .and_then(Value::as_str)
                             .unwrap_or("")
                         {
-                            "committed_transcript"
-                            | "committed_transcript_with_timestamps" => {
-                                let t = evt
-                                    .get("text")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .trim();
+                            "committed_transcript" | "committed_transcript_with_timestamps" => {
+                                let t =
+                                    evt.get("text").and_then(Value::as_str).unwrap_or("").trim();
                                 if !t.is_empty() {
                                     parts.push(t.to_string());
                                 }
                             }
-                            "error"
-                            | "auth_error"
-                            | "quota_exceeded"
-                            | "rate_limited"
+                            "error" | "auth_error" | "quota_exceeded" | "rate_limited"
                             | "unaccepted_terms" => {
                                 let msg = evt
                                     .get("error")
@@ -335,10 +317,11 @@ impl Transcriber for ScribeEngine {
         match collected {
             Ok(Ok(parts)) => Ok(parts.join(" ")),
             Ok(Err(e)) => Err(e),
-            Err(_) => {
-                warn!("batch transcription timed out waiting for final commits");
-                Ok(String::new())
-            }
+            // A timeout is a failure, not an empty transcription — surfacing it
+            // lets the caller retry instead of silently writing nothing.
+            Err(_) => Err(anyhow::anyhow!(
+                "scribe batch transcription timed out waiting for final commits"
+            )),
         }
     }
 }
@@ -373,59 +356,4 @@ where
         }
     }
     Ok(sent)
-}
-
-fn vu_level_from_rms(rms: f64) -> u8 {
-    if rms <= 0.0005 {
-        return 0;
-    }
-    // Speech RMS values are usually small; square-root compression makes the
-    // tray meter readable without needing exact dB calibration.
-    ((rms.min(0.20) / 0.20).sqrt() * 255.0).round() as u8
-}
-
-#[derive(Default)]
-struct AudioLevel {
-    samples: usize,
-    sumsq: f64,
-    peak: f32,
-    last_emit: Option<std::time::Instant>,
-    last_log: Option<std::time::Instant>,
-}
-
-impl AudioLevel {
-    fn add(&mut self, samples: &[f32]) {
-        for &sample in samples {
-            self.samples += 1;
-            self.sumsq += (sample as f64) * (sample as f64);
-            self.peak = self.peak.max(sample.abs());
-        }
-    }
-
-    fn maybe_emit(&mut self) -> Option<u8> {
-        let now = std::time::Instant::now();
-        if self
-            .last_emit
-            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(200))
-        {
-            return None;
-        }
-        if self.samples == 0 {
-            return None;
-        }
-        let rms = (self.sumsq / self.samples as f64).sqrt();
-        if self
-            .last_log
-            .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(1))
-        {
-            info!("audio level: rms={rms:.4} peak={:.4}", self.peak);
-            self.last_log = Some(now);
-        }
-        let level = vu_level_from_rms(rms);
-        self.samples = 0;
-        self.sumsq = 0.0;
-        self.peak = 0.0;
-        self.last_emit = Some(now);
-        Some(level)
-    }
 }

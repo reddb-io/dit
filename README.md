@@ -203,6 +203,7 @@ dit --hotkey "RightAlt+F9"   # combo
 | `--no-preview` | off | Disable live terminal preview |
 | `--paste-shift` | off | Linux: paste with `Ctrl+Shift+V` (for terminals) |
 | `--type` | off | Linux: type via uinput instead of clipboard |
+| `--layout` | `auto` | Linux `--type` keyboard layout: `auto`, `us`, `abnt2` |
 | `--env-file` | `~/.dit.env` | Path to the API key file |
 | `--list-devices` | — | Print input devices and exit |
 
@@ -214,20 +215,18 @@ The local engine runs Whisper inference fully on-device — no internet, no API 
 
 ```bash
 # Manage models
-dit models list                    # show available models and which are installed
-dit models download base           # download the "base" Whisper model (~145 MB)
-dit models download small          # download "small" (~488 MB)
-dit models path                    # print the models directory (~/.dit/models/)
-dit models rm base                 # delete a downloaded model
+dit models list                          # show available models and which are installed
+dit models download whisper-tiny-local   # download the offline model (~42 MB)
+dit models path                          # print the models directory (~/.dit/models/)
+dit models rm whisper-tiny-local         # delete a downloaded model
 
-# Use a specific model
-dit --engine local --model base    # use the base model
-dit --engine local --model small   # use the small model
+# Dictate offline
+dit --engine local                       # uses whisper-tiny-local by default
 ```
 
-Models are downloaded from HuggingFace, verified by SHA-256, and stored in `~/.dit/models/`. The Models tab in `dit settings` also lets you manage them visually.
+Each model is a quantised GGUF plus its tokenizer, downloaded from HuggingFace, verified by SHA-256, and stored in `~/.dit/models/`. The Models tab in `dit settings` also lets you manage them visually. Long recordings are transcribed in 30-second windows, so nothing is cut off.
 
-Available models: `tiny`, `base`, `small`, `medium`, `large-v2`, `large-v3`.
+Available models: `whisper-tiny-local` (multilingual tiny, q8_0 — alias: `tiny`). Larger quantised builds will be added as they become available upstream.
 
 ---
 
@@ -254,10 +253,11 @@ All settings persist to `~/.dit/config.toml` and are shared with the CLI. The tr
 Transcribe existing audio files with either engine:
 
 ```bash
-dit transcribe meeting.wav                         # cloud engine, stdout
-dit transcribe --engine local interview.mp3        # local Whisper, stdout
-dit transcribe lecture.flac --output lecture.txt   # write to file
-dit transcribe --engine local *.wav                # batch, multiple files
+dit transcribe meeting.wav                       # cloud engine, stdout
+dit transcribe --engine local interview.mp3      # local Whisper, no API key needed
+dit transcribe lecture.flac --out lecture.txt    # write to file
+dit transcribe --engine local *.wav              # batch, multiple files
+dit transcribe --language en talk.wav            # pick the language (or `auto`)
 ```
 
 Supported formats: `wav`, `mp3`, `flac`, `m4a`.
@@ -270,11 +270,12 @@ The system tray provides runtime controls without restarting:
 
 - **Switch input device** — submenu with all detected mics
 - **Switch language** — change on the fly
-- **Switch engine** — cloud ↔ local
-- **Switch mode** — toggle ↔ hold
+- **Switch mode** — toggle ↔ hold, applied to the very next key press
+- **Switch transcript style** — verbatim ↔ remove fillers
+- **Switch engine** — cloud ↔ local (in builds with the local engine)
 - **Settings…** — open the settings GUI
 - **Open last transcript** — opens the most recent session log
-- **Pause** — temporarily disable the hotkey
+- **Pause** — the hotkey can't *start* a recording; stopping always works
 
 ---
 
@@ -318,6 +319,8 @@ dit service uninstall
 > ```
 >
 > In terminals, use `--paste-shift` (`Ctrl+Shift+V`) or `--type` (uinput typing, bypasses clipboard entirely — avoids GNOME/Wayland intermittently interpreting the clipboard as an image after a screenshot copy).
+>
+> `--type` is layout-aware: dit detects the active keyboard layout (XKB env → GNOME settings → setxkbmap → localectl → locale) and maps characters accordingly. `us` and `abnt2` (Brazilian) are supported — on ABNT2, `ç` is typed directly and dead-key accents ride the clipboard fallback. Pin it with `--layout us|abnt2` (or `layout = "abnt2"` in config.toml) if detection guesses wrong; `dit doctor` shows what was detected.
 
 > [!NOTE]
 > **macOS** — grant **Accessibility** permission (System Settings → Privacy & Security → Accessibility).

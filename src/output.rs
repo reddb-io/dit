@@ -290,21 +290,16 @@ mod tests {
 
     #[test]
     fn newest_session_picks_the_latest_stamp() {
+        // Fixed stamps: recomputing "now" here races the file-creation clock
+        // (Windows' ~16 ms timer granularity made that flaky).
         let dir = session_dir("newest");
-        // Age in days descending → most recent has the largest unix-ms stamp.
-        make_session(&dir, 5);
-        make_session(&dir, 1);
-        make_session(&dir, 10);
+        for ms in [1_000u128, 3_000, 2_000] {
+            fs::write(dir.join(format!("session-{ms}.txt")), "# test\n").unwrap();
+        }
         let newest = newest_session_in(&dir).expect("a session exists");
-        // The 1-day-old file carries the largest stamp.
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        let expected_ms = now_ms.saturating_sub(24 * 3600 * 1000);
         assert_eq!(
             newest.file_name().unwrap().to_string_lossy(),
-            format!("session-{expected_ms}.txt")
+            "session-3000.txt"
         );
         let _ = fs::remove_dir_all(&dir);
     }

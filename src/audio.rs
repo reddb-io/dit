@@ -391,6 +391,84 @@ fn to_i16(s: f32) -> i16 {
     (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
 }
 
+/// After the stop signal, pull whatever the capture thread already queued so
+/// the tail of the recording isn't lost, resampling it into `out`. Waits up to
+/// 50 ms per frame; returns when the channel runs dry.
+pub async fn drain_capture(
+    audio: &mut tokio::sync::mpsc::Receiver<CaptureEvent>,
+    resampler: &mut Resampler,
+    out: &mut Vec<u8>,
+) {
+    use tokio::time::timeout;
+    while let Ok(Some(event)) = timeout(std::time::Duration::from_millis(50), audio.recv()).await {
+        match event {
+            CaptureEvent::Format { sample_rate } => {
+                *resampler = Resampler::new(sample_rate, crate::config::SAMPLE_RATE);
+            }
+            CaptureEvent::Samples(frame) => {
+                resampler.push(&frame, out);
+            }
+        }
+    }
+}
+
+/// Map a speech RMS value to a 0–255 tray VU level. Square-root compression
+/// keeps the meter readable without exact dB calibration (speech RMS is small).
+fn vu_level_from_rms(rms: f64) -> u8 {
+    if rms <= 0.0005 {
+        return 0;
+    }
+    ((rms.min(0.20) / 0.20).sqrt() * 255.0).round() as u8
+}
+
+/// Rolling audio-level meter shared by every engine: accumulate samples and
+/// emit a tray VU level at most every 200 ms (with a 1 Hz RMS debug log).
+#[derive(Default)]
+pub struct AudioLevel {
+    samples: usize,
+    sumsq: f64,
+    peak: f32,
+    last_emit: Option<std::time::Instant>,
+    last_log: Option<std::time::Instant>,
+}
+
+impl AudioLevel {
+    pub fn add(&mut self, samples: &[f32]) {
+        for &sample in samples {
+            self.samples += 1;
+            self.sumsq += (sample as f64) * (sample as f64);
+            self.peak = self.peak.max(sample.abs());
+        }
+    }
+
+    pub fn maybe_emit(&mut self) -> Option<u8> {
+        let now = std::time::Instant::now();
+        if self
+            .last_emit
+            .is_some_and(|last| now.duration_since(last) < std::time::Duration::from_millis(200))
+        {
+            return None;
+        }
+        if self.samples == 0 {
+            return None;
+        }
+        let rms = (self.sumsq / self.samples as f64).sqrt();
+        if self
+            .last_log
+            .is_none_or(|last| now.duration_since(last) >= std::time::Duration::from_secs(1))
+        {
+            info!("audio level: rms={rms:.4} peak={:.4}", self.peak);
+            self.last_log = Some(now);
+        }
+        let level = vu_level_from_rms(rms);
+        self.samples = 0;
+        self.sumsq = 0.0;
+        self.peak = 0.0;
+        self.last_emit = Some(now);
+        Some(level)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

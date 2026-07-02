@@ -86,6 +86,49 @@ pub enum Engine {
     Local,
 }
 
+impl Engine {
+    /// The canonical config-file/CLI token for this engine.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Engine::Cloud => "cloud",
+            Engine::Local => "local",
+        }
+    }
+}
+
+impl RecordingMode {
+    /// The canonical config-file/CLI token for this mode.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RecordingMode::Toggle => "toggle",
+            RecordingMode::Hold => "hold",
+        }
+    }
+}
+
+/// The user's keyboard-layout preference for the Linux typing path (`--type`).
+/// `Auto` asks the platform (XKB env, desktop settings, localectl, locale) at
+/// startup; the explicit values pin the map regardless of what's detected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LayoutSetting {
+    #[default]
+    Auto,
+    /// US/ASCII (QWERTY) — the historical behaviour.
+    Us,
+    /// Brazilian ABNT2 — `ç` typeable, dead keys (´ ` ~ ^ ¨) via clipboard.
+    Abnt2,
+}
+
+/// Parse a layout token (`auto`, `us`, `abnt2`/`br`).
+pub(crate) fn parse_layout(s: &str) -> Result<LayoutSetting> {
+    match s.to_ascii_lowercase().as_str() {
+        "auto" => Ok(LayoutSetting::Auto),
+        "us" => Ok(LayoutSetting::Us),
+        "abnt2" | "br" => Ok(LayoutSetting::Abnt2),
+        other => bail!("layout must be `auto`, `us` or `abnt2`, got {other}"),
+    }
+}
+
 /// Cross-platform voice dictation via ElevenLabs Scribe v2 Realtime.
 #[derive(Parser, Debug)]
 #[command(name = "dit", version, about)]
@@ -164,6 +207,12 @@ pub struct Cli {
     /// `local` (offline Whisper via candle, needs a model from `dit models`).
     #[arg(long, default_value = "cloud")]
     pub engine: String,
+
+    /// Keyboard layout for the Linux typing path (`--type`): `auto` (detect
+    /// from the desktop/locale), `us`, or `abnt2` (Brazilian). Ignored on
+    /// macOS/Windows, where the OS input method handles layout.
+    #[arg(long, default_value = "auto")]
+    pub layout: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -208,6 +257,13 @@ pub enum Command {
         /// Language code (`pt`, `en`, …) or `auto` for auto-detection.
         #[arg(long, default_value = "pt")]
         language: String,
+        /// Transcription engine: `cloud` (needs API key) or `local` (offline).
+        #[arg(long, default_value = "cloud")]
+        engine: String,
+        /// Model override: a Scribe model id for `cloud`, or a `dit models`
+        /// id (e.g. `whisper-base-local`) for `local`.
+        #[arg(long)]
+        model: Option<String>,
     },
 }
 
@@ -283,6 +339,7 @@ pub struct SettingsLayer {
     pub session_max_age_days: Option<u64>,
     pub session_max_count: Option<usize>,
     pub engine: Option<String>,
+    pub layout: Option<String>,
 }
 
 /// Settings after merging every layer over the built-in defaults. Distinct from
@@ -305,6 +362,7 @@ struct ResolvedSettings {
     session_max_age_days: u64,
     session_max_count: usize,
     engine: String,
+    layout: String,
 }
 
 /// Merge the three override layers over the defaults. Later arguments win:
@@ -350,6 +408,7 @@ fn merge(file: SettingsLayer, env: SettingsLayer, cli: SettingsLayer) -> Resolve
             cli.session_max_count,
         ),
         engine: pick("cloud".into(), file.engine, env.engine, cli.engine),
+        layout: pick("auto".into(), file.layout, env.layout, cli.layout),
     }
 }
 
@@ -402,6 +461,7 @@ fn env_layer(get: impl Fn(&str) -> Option<String>) -> SettingsLayer {
         session_max_age_days: s("DIT_SESSION_MAX_AGE_DAYS").and_then(|v| v.parse().ok()),
         session_max_count: s("DIT_SESSION_MAX_COUNT").and_then(|v| v.parse().ok()),
         engine: s("DIT_ENGINE"),
+        layout: s("DIT_LAYOUT"),
     }
 }
 
@@ -426,6 +486,7 @@ fn cli_layer(cli: &Cli, matches: &ArgMatches) -> SettingsLayer {
         session_max_age_days: None,
         session_max_count: None,
         engine: on_cli("engine").then(|| cli.engine.clone()),
+        layout: on_cli("layout").then(|| cli.layout.clone()),
     }
 }
 
@@ -448,6 +509,7 @@ pub struct Config {
     pub session_max_age_days: u64,
     pub session_max_count: usize,
     pub engine: Engine,
+    pub layout: LayoutSetting,
 }
 
 /// Target sample rate sent to the API (Scribe expects 16 kHz mono s16le).
@@ -492,6 +554,8 @@ impl Config {
             .with_context(|| format!("unsupported hotkey: {}", settings.hotkey))?;
         let mode = parse_mode(&settings.mode)
             .with_context(|| format!("unsupported mode: {}", settings.mode))?;
+        let layout = parse_layout(&settings.layout)
+            .with_context(|| format!("unsupported layout: {}", settings.layout))?;
 
         // When using the local engine and the user didn't explicitly set a model,
         // default to the local model instead of the cloud model.
@@ -518,6 +582,7 @@ impl Config {
             session_max_age_days: settings.session_max_age_days,
             session_max_count: settings.session_max_count,
             engine,
+            layout,
         })
     }
 
@@ -585,6 +650,10 @@ pub enum Reconfigure {
     NoFiller(bool),
     /// Speech-to-text engine / model id (e.g. `scribe_v2_realtime`).
     Model(String),
+    /// Transcription backend: cloud (Scribe) or local (offline Whisper).
+    Engine(Engine),
+    /// Hotkey behaviour: press-to-toggle or hold-to-record.
+    Mode(RecordingMode),
 }
 
 impl Reconfigure {
@@ -595,6 +664,8 @@ impl Reconfigure {
             Reconfigure::Language(l) => cfg.language = l.clone(),
             Reconfigure::NoFiller(b) => cfg.no_filler = *b,
             Reconfigure::Model(m) => cfg.model = m.clone(),
+            Reconfigure::Engine(e) => cfg.engine = *e,
+            Reconfigure::Mode(m) => cfg.mode = *m,
         }
     }
 
@@ -607,6 +678,8 @@ impl Reconfigure {
             Reconfigure::Language(l) => layer.language = Some(l.clone()),
             Reconfigure::NoFiller(b) => layer.no_filler = Some(*b),
             Reconfigure::Model(m) => layer.model = Some(m.clone()),
+            Reconfigure::Engine(e) => layer.engine = Some(e.as_str().into()),
+            Reconfigure::Mode(m) => layer.mode = Some(m.as_str().into()),
         }
     }
 
@@ -674,7 +747,7 @@ pub(crate) fn load_env_file(path: &PathBuf) {
 }
 
 /// Parse the engine name into an [`Engine`].
-fn parse_engine(name: &str) -> Result<Engine> {
+pub(crate) fn parse_engine(name: &str) -> Result<Engine> {
     match name.to_ascii_lowercase().as_str() {
         "cloud" => Ok(Engine::Cloud),
         "local" => Ok(Engine::Local),
@@ -946,12 +1019,14 @@ mod tests {
     fn type_flag_layers_through_cli_env_and_file() {
         // `--type` (the opt-in hybrid typing path) must flow through the same
         // defaults < file < env < cli ladder as the other knobs.
-        assert!(!merge(
-            SettingsLayer::default(),
-            SettingsLayer::default(),
-            SettingsLayer::default(),
-        )
-        .type_hybrid);
+        assert!(
+            !merge(
+                SettingsLayer::default(),
+                SettingsLayer::default(),
+                SettingsLayer::default(),
+            )
+            .type_hybrid
+        );
 
         let matches = Cli::command().get_matches_from(["dit", "--type"]);
         let cli = Cli::from_arg_matches(&matches).expect("parses");
@@ -1102,6 +1177,7 @@ mod tests {
             session_max_age_days: DEFAULT_SESSION_MAX_AGE_DAYS,
             session_max_count: DEFAULT_SESSION_MAX_COUNT,
             engine: Engine::Cloud,
+            layout: LayoutSetting::Auto,
         }
     }
 
