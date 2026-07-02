@@ -83,7 +83,10 @@ const LANGUAGE_PRESETS: &[(&str, &str)] = &[
 /// Engine presets offered in the tray "Engine" submenu. The local engine only
 /// appears in builds that carry it.
 const ENGINE_PRESETS: &[(&str, config::Engine)] = &[
-    ("ElevenLabs (Scribe v2 Realtime)", config::Engine::ElevenLabs),
+    (
+        "ElevenLabs (Scribe v2 Realtime)",
+        config::Engine::ElevenLabs,
+    ),
     #[cfg(feature = "local")]
     ("Local (offline Whisper)", config::Engine::Local),
 ];
