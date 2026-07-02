@@ -136,6 +136,17 @@ jobs:
         if: matrix.kind == 'zig'
         run: pipx install cargo-zigbuild
 
+      # cargo-zigbuild shells out to `zig cc`; the runner ships no zig, so fetch
+      # the pinned toolchain straight from ziglang.org (works on x86_64 and the
+      # aarch64 ARM runner alike).
+      - name: Install zig
+        if: matrix.kind == 'zig'
+        run: |
+          ZIG_VERSION=0.13.0
+          ARCH="$(uname -m)"
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ARCH}-${ZIG_VERSION}.tar.xz" | sudo tar -xJ -C /opt
+          echo "/opt/zig-linux-${ARCH}-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
       - uses: Swatinem/rust-cache@v2
         if: matrix.kind != 'musl'
         with:
@@ -164,6 +175,8 @@ jobs:
             "messense/rust-musl-cross:${MUSL_IMAGE}" bash -lc '
               set -euo pipefail
               rm -f rust-toolchain.toml
+              # alsa-sys probes ALSA via pkg-config, which the image does not ship.
+              apt-get update -qq && apt-get install -y -qq pkg-config >/dev/null
               # Build a static libasound for the musl target so alsa-sys links it in.
               ALSA_VER=1.2.11
               curl -sSL "https://www.alsa-project.org/files/pub/lib/alsa-lib-${ALSA_VER}.tar.bz2" -o /tmp/alsa.tar.bz2
@@ -173,11 +186,16 @@ jobs:
                 --disable-python --without-debug --prefix=/musl-alsa CC="${TARGET_CC:-${MUSL_HOST}-gcc}"
               make -j"$(nproc)" >/dev/null && make install >/dev/null
               cd /volume
-              export PKG_CONFIG_PATH=/musl-alsa/lib/pkgconfig
-              export PKG_CONFIG_ALLOW_CROSS=1
-              export ALSA_STATIC=1
-              export RUSTFLAGS="-C target-feature=+crt-static"
-              cargo build --locked --release --features local --target "${MUSL_TARGET}" --bin dit
+              # The image presets target-scoped PKG_CONFIG_* vars aimed at its own
+              # sysroot, and those outrank a plain PKG_CONFIG_PATH. The hyphenated
+              # forms below outrank the preset ones in turn, steering alsa-sys to
+              # the static libasound built above.
+              env "PKG_CONFIG_PATH_${MUSL_TARGET}=/musl-alsa/lib/pkgconfig" \
+                  "PKG_CONFIG_LIBDIR_${MUSL_TARGET}=/musl-alsa/lib/pkgconfig" \
+                  "PKG_CONFIG_SYSROOT_DIR_${MUSL_TARGET}=/" \
+                  PKG_CONFIG_ALLOW_CROSS=1 ALSA_STATIC=1 \
+                  RUSTFLAGS="-C target-feature=+crt-static" \
+                  cargo build --locked --release --features local --target "${MUSL_TARGET}" --bin dit
             '
           sudo chown -R "$(id -u):$(id -g)" "target/${{ matrix.target }}"
 
