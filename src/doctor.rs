@@ -18,8 +18,9 @@ pub fn run(prefer_device: Option<String>) -> Result<()> {
 fn check_local_engine() {
     // Report local engine readiness: whether the default offline model is on disk.
     use crate::config::DEFAULT_LOCAL_MODEL;
-    use crate::models::resolve_local_model;
-    let present = resolve_local_model(DEFAULT_LOCAL_MODEL).is_some();
+    let present = crate::models::list_catalog()
+        .iter()
+        .any(|e| e.id == DEFAULT_LOCAL_MODEL && e.installed);
     status(
         present,
         "local engine model",
@@ -109,6 +110,17 @@ fn check_linux_input() {
         .map(|m| format!("mode {:o}", m.permissions().mode() & 0o777))
         .unwrap_or_else(|_| "missing".to_string());
     status(uinput_ok, "/dev/uinput write", &uinput_mode);
+
+    // Which char → keycode map the typing path (`--type`) would use.
+    let layout = crate::layout::resolve(crate::config::LayoutSetting::Auto);
+    status(
+        true,
+        "keyboard layout",
+        &format!(
+            "{} detected for --type (pin with --layout us|abnt2 if wrong)",
+            layout.name()
+        ),
+    );
 }
 
 #[cfg(not(target_os = "linux"))]

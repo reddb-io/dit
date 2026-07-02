@@ -1,9 +1,9 @@
 //! Backend abstraction for speech-to-text engines.
 //!
-//! [`Transcriber`] covers both live streaming (cloud) and batch (local)
-//! transcription. The current implementation is [`ScribeEngine`] (ElevenLabs
-//! Scribe v2 Realtime). Future slices will add local-engine implementations
-//! behind the same trait without reshaping callers.
+//! [`Transcriber`] covers live dictation and batch file transcription behind
+//! one trait. Two implementations exist: [`ScribeEngine`] (ElevenLabs Scribe
+//! v2 Realtime, streaming over WebSocket) and, with `--features local`,
+//! [`LocalEngine`] (offline Whisper via candle).
 
 use std::sync::{atomic::AtomicBool, Arc};
 
@@ -26,9 +26,9 @@ pub use local::LocalEngine;
 /// Speech-to-text backend.
 ///
 /// `run_stream` drives live dictation (audio in → text typed in real time).
-/// `transcribe_batch` covers future file/local-recording transcription (audio
-/// buffer in → full transcript out). Both shapes share the same engine
-/// abstraction so callers can switch implementations without structural changes.
+/// `transcribe_batch` handles file transcription (audio buffer in → full
+/// transcript out). Both shapes share the same engine abstraction so callers
+/// can switch implementations without structural changes.
 pub trait Transcriber: Send + Sync {
     /// Connect to the backend, stream audio from `audio` until `stop` fires,
     /// then drain buffered frames, flush a final commit, and close. Committed

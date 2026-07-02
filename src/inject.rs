@@ -21,21 +21,28 @@ pub struct Injector {
 }
 
 impl Injector {
-    /// Spawn the injector thread. `paste_shift` and `type_hybrid` only affect
-    /// Linux: `paste_shift` uses Ctrl+Shift+V instead of Ctrl+V (for terminals),
-    /// and `type_hybrid` opts into typing the text via uinput with a clipboard
-    /// fallback instead of pasting (issue #18). macOS/Windows always type via
-    /// enigo, so both flags are ignored there.
-    pub fn spawn(paste_shift: bool, type_hybrid: bool) -> Result<Self> {
+    /// Spawn the injector thread. On Linux this honours `cfg.paste_shift`
+    /// (Ctrl+Shift+V instead of Ctrl+V, for terminals), `cfg.type_hybrid`
+    /// (type via uinput with a clipboard fallback instead of pasting) and
+    /// `cfg.layout` (which char → keycode map the typing path uses; `auto`
+    /// detects the active layout once, here). macOS/Windows always type via
+    /// enigo, which follows the OS input method, so none of this applies.
+    pub fn spawn(cfg: &crate::config::Config) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<InjectMsg>();
 
         #[cfg(target_os = "linux")]
-        std::thread::spawn(move || crate::linux_input::run_injector(rx, paste_shift, type_hybrid));
+        {
+            let paste_shift = cfg.paste_shift;
+            let type_hybrid = cfg.type_hybrid;
+            let layout = crate::layout::resolve(cfg.layout);
+            std::thread::spawn(move || {
+                crate::linux_input::run_injector(rx, paste_shift, type_hybrid, layout)
+            });
+        }
 
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = paste_shift;
-            let _ = type_hybrid;
+            let _ = cfg;
             std::thread::spawn(move || run_enigo(rx));
         }
 

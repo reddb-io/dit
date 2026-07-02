@@ -2,8 +2,9 @@
 //!
 //! Decodes common audio formats (wav/mp3/flac/m4a) via Symphonia, resamples
 //! to 16 kHz mono using the existing [`Resampler`], and sends the PCM through
-//! the [`Transcriber`] trait (currently backed by the cloud Scribe engine).
-//! Output can be routed to stdout, a `.txt` file, or the clipboard.
+//! the [`Transcriber`] trait — cloud Scribe by default, or offline Whisper
+//! with `--engine local` (no API key required). Output can be routed to
+//! stdout, a `.txt` file, or the clipboard.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -19,8 +20,8 @@ use symphonia::core::probe::Hint;
 
 use crate::audio::Resampler;
 use crate::config::{
-    self, Config, Hotkey, Key, DEFAULT_MODEL, DEFAULT_REGION, DEFAULT_SESSION_MAX_AGE_DAYS,
-    DEFAULT_SESSION_MAX_COUNT, DEFAULT_VAD_SILENCE, SAMPLE_RATE,
+    self, Config, Engine, Hotkey, Key, LayoutSetting, RecordingMode, DEFAULT_MODEL, DEFAULT_REGION,
+    DEFAULT_SESSION_MAX_AGE_DAYS, DEFAULT_SESSION_MAX_COUNT, DEFAULT_VAD_SILENCE, SAMPLE_RATE,
 };
 use crate::engine::{ScribeEngine, Transcriber};
 
@@ -37,17 +38,21 @@ pub struct TranscribeArgs {
     pub language: String,
     /// Path to the dotenv file holding `ELEVENLABS_API_KEY`.
     pub env_file: Option<PathBuf>,
+    /// Engine name: `cloud` or `local`.
+    pub engine: String,
+    /// Model override (Scribe id for cloud, `dit models` id for local).
+    pub model: Option<String>,
 }
 
 pub async fn run(args: TranscribeArgs) -> Result<()> {
-    let cfg = build_config(&args)?;
-    let engine = ScribeEngine;
+    let engine = config::parse_engine(&args.engine)?;
+    let cfg = build_config(&args, engine)?;
     let multi = args.files.len() > 1;
     let mut parts: Vec<String> = Vec::new();
 
     for path in &args.files {
-        let (pcm_f32, native_rate) = decode_audio(path)
-            .with_context(|| format!("cannot decode {}", path.display()))?;
+        let (pcm_f32, native_rate) =
+            decode_audio(path).with_context(|| format!("cannot decode {}", path.display()))?;
 
         let resampler = Resampler::new(native_rate, SAMPLE_RATE);
         let mut pcm_bytes: Vec<u8> = Vec::new();
@@ -57,8 +62,7 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
             .map(|b| i16::from_le_bytes([b[0], b[1]]))
             .collect();
 
-        let transcript = engine
-            .transcribe_batch(&cfg, pcm_i16)
+        let transcript = transcribe_pcm(engine, &cfg, pcm_i16)
             .await
             .with_context(|| format!("transcription failed for {}", path.display()))?;
 
@@ -83,10 +87,8 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
             eprintln!("transcript written to {}", path.display());
         }
         OutputDest::Clipboard => {
-            let mut ctx =
-                arboard::Clipboard::new().context("cannot open clipboard")?;
-            ctx.set_text(&result)
-                .context("cannot write to clipboard")?;
+            let mut ctx = arboard::Clipboard::new().context("cannot open clipboard")?;
+            ctx.set_text(&result).context("cannot write to clipboard")?;
             eprintln!(
                 "transcript copied to clipboard ({} chars)",
                 result.chars().count()
@@ -102,8 +104,8 @@ pub async fn run(args: TranscribeArgs) -> Result<()> {
 /// Supports wav, mp3, flac, and m4a via Symphonia. Returns the flat mono
 /// samples and the file's native sample rate so callers can resample.
 pub fn decode_audio(path: &Path) -> Result<(Vec<f32>, u32)> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("cannot open {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
     let mut hint = Hint::new();
@@ -125,9 +127,7 @@ pub fn decode_audio(path: &Path) -> Result<(Vec<f32>, u32)> {
     let track = format
         .tracks()
         .iter()
-        .find(|t| {
-            t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL
-        })
+        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
         .context("no audio track found")?;
 
     let track_id = track.id;
@@ -145,9 +145,7 @@ pub fn decode_audio(path: &Path) -> Result<(Vec<f32>, u32)> {
     loop {
         let packet = match format.next_packet() {
             Ok(p) => p,
-            Err(SymphoniaError::IoError(e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
+            Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 break;
             }
             Err(SymphoniaError::ResetRequired) => continue,
@@ -186,7 +184,25 @@ pub fn decode_audio(path: &Path) -> Result<(Vec<f32>, u32)> {
     Ok((samples, sample_rate))
 }
 
-fn build_config(args: &TranscribeArgs) -> Result<Config> {
+/// Route one decoded file through the selected engine.
+async fn transcribe_pcm(engine: Engine, cfg: &Config, pcm: Vec<i16>) -> Result<String> {
+    match engine {
+        Engine::Cloud => ScribeEngine.transcribe_batch(cfg, pcm).await,
+        #[cfg(feature = "local")]
+        Engine::Local => {
+            let model = crate::models::resolve_local_model(&cfg.model)?;
+            crate::engine::LocalEngine::new(model)
+                .transcribe_batch(cfg, pcm)
+                .await
+        }
+        #[cfg(not(feature = "local"))]
+        Engine::Local => anyhow::bail!(
+            "dit was built without --features local; rebuild with `cargo build --features local`"
+        ),
+    }
+}
+
+fn build_config(args: &TranscribeArgs, engine: Engine) -> Result<Config> {
     // Load API key from the env file (if present) then from the process env.
     let env_path = args
         .env_file
@@ -196,8 +212,9 @@ fn build_config(args: &TranscribeArgs) -> Result<Config> {
         config::load_env_file(path);
     }
 
+    // The local engine is fully offline — only the cloud path needs a key.
     let api_key = std::env::var("ELEVENLABS_API_KEY").unwrap_or_default();
-    if api_key.is_empty() {
+    if api_key.is_empty() && engine == Engine::Cloud {
         anyhow::bail!(
             "ELEVENLABS_API_KEY is not set. Put it in {} or export it in the environment.",
             env_path
@@ -210,15 +227,22 @@ fn build_config(args: &TranscribeArgs) -> Result<Config> {
         .map(|p| config::load_file_config(&p))
         .unwrap_or_default();
 
+    let model = match (&args.model, engine) {
+        (Some(m), _) => m.clone(),
+        (None, Engine::Cloud) => file.model.unwrap_or_else(|| DEFAULT_MODEL.into()),
+        (None, Engine::Local) => config::DEFAULT_LOCAL_MODEL.into(),
+    };
+
     Ok(Config {
         api_key,
         language: args.language.clone(),
-        model: file.model.unwrap_or_else(|| DEFAULT_MODEL.into()),
+        model,
         // Hotkey is unused for transcription; use a harmless default.
         hotkey: Hotkey {
             modifiers: vec![],
             key: Key::F9,
         },
+        mode: RecordingMode::Toggle,
         device: None,
         no_filler: file.no_filler.unwrap_or(false),
         keyterms: file.keyterms.unwrap_or_default(),
@@ -226,10 +250,13 @@ fn build_config(args: &TranscribeArgs) -> Result<Config> {
         region: file.region.unwrap_or_else(|| DEFAULT_REGION.into()),
         no_preview: true,
         paste_shift: false,
+        type_hybrid: false,
         session_max_age_days: file
             .session_max_age_days
             .unwrap_or(DEFAULT_SESSION_MAX_AGE_DAYS),
         session_max_count: file.session_max_count.unwrap_or(DEFAULT_SESSION_MAX_COUNT),
+        engine,
+        layout: LayoutSetting::Auto,
     })
 }
 
@@ -255,7 +282,7 @@ mod tests {
         out.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
         out.extend_from_slice(&2u16.to_le_bytes()); // block align
         out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-        // data chunk
+                                                     // data chunk
         out.extend_from_slice(b"data");
         out.extend_from_slice(&data_len.to_le_bytes());
         for &s in samples {
@@ -273,8 +300,8 @@ mod tests {
         let wav = make_wav(native_rate, &raw);
 
         // Write to a temp file and decode
-        let tmp = std::env::temp_dir()
-            .join(format!("dit-transcribe-test-{}.wav", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("dit-transcribe-test-{}.wav", std::process::id()));
         std::fs::write(&tmp, &wav).unwrap();
         let (pcm_f32, rate) = decode_audio(&tmp).unwrap();
         std::fs::remove_file(&tmp).ok();

@@ -23,6 +23,8 @@ mod doctor;
 mod engine;
 mod inject;
 #[cfg(target_os = "linux")]
+mod layout;
+#[cfg(target_os = "linux")]
 mod linux_input;
 mod models;
 mod notify;
@@ -47,20 +49,23 @@ use transcribe::run_session;
 
 /// Control messages from the UI (tray + hotkey) to the async session manager.
 ///
-/// `Toggle` starts/stops a session. `Reconfigure` swaps a runtime knob
-/// (device/language/mode/engine) so the *next* session uses it without
-/// restarting the process, and persists the choice. `SetPaused` suspends the
-/// hotkey (toggles are ignored while paused). `OpenLastTranscript` opens the
-/// most recent session log in the platform's default handler.
+/// The hotkey layers report raw `KeyDown`/`KeyUp`; the manager interprets them
+/// against the *live* recording mode (toggle vs. hold), so the mode can change
+/// at runtime from the tray. `Toggle` is the tray's explicit start/stop.
+/// `Reconfigure` swaps a runtime knob (device/language/engine/mode/…) so the
+/// next session uses it without restarting, and persists the choice.
+/// `SetPaused` suspends the hotkey: nothing can *start* while paused, but an
+/// active recording can always be stopped. `OpenLastTranscript` opens the most
+/// recent session log in the platform's default handler.
 pub enum Control {
-    /// Toggle mode: flip between recording and idle.
+    /// Tray: flip between recording and idle.
     Toggle,
     Reconfigure(config::Reconfigure),
     SetPaused(bool),
     OpenLastTranscript,
-    /// Hold mode: key pressed — start recording if idle.
+    /// Hotkey pressed.
     KeyDown,
-    /// Hold mode: key released — stop recording if active.
+    /// Hotkey released.
     KeyUp,
 }
 
@@ -75,11 +80,25 @@ const LANGUAGE_PRESETS: &[(&str, &str)] = &[
     ("Auto-detect", "auto"),
 ];
 
-/// Engine/model presets offered in the tray "Engine" submenu: (label, model id).
-const ENGINE_PRESETS: &[(&str, &str)] = &[("Scribe v2 Realtime", "scribe_v2_realtime")];
+/// Engine presets offered in the tray "Engine" submenu. The local engine only
+/// appears in builds that carry it.
+const ENGINE_PRESETS: &[(&str, config::Engine)] = &[
+    ("Cloud (Scribe v2 Realtime)", config::Engine::Cloud),
+    #[cfg(feature = "local")]
+    ("Local (offline Whisper)", config::Engine::Local),
+];
 
-/// Dictation mode presets offered in the tray "Mode" submenu: (label, no_filler).
-const MODE_PRESETS: &[(&str, bool)] = &[("Verbatim", false), ("Remove fillers", true)];
+/// Recording-mode presets offered in the tray "Mode" submenu.
+const RECORDING_MODE_PRESETS: &[(&str, config::RecordingMode)] = &[
+    (
+        "Toggle (press to start/stop)",
+        config::RecordingMode::Toggle,
+    ),
+    ("Hold (record while held)", config::RecordingMode::Hold),
+];
+
+/// Transcript presets offered in the tray "Transcript" submenu: (label, no_filler).
+const FILLER_PRESETS: &[(&str, bool)] = &[("Verbatim", false), ("Remove fillers", true)];
 
 /// What the tray icon should show.
 #[derive(Clone, Copy, Debug)]
@@ -134,6 +153,8 @@ fn main() -> Result<()> {
         out,
         clipboard,
         language,
+        engine,
+        model,
     }) = &cli.command
     {
         let output = if *clipboard {
@@ -151,6 +172,8 @@ fn main() -> Result<()> {
             output,
             language: language.clone(),
             env_file: cli.env_file.clone(),
+            engine: engine.clone(),
+            model: model.clone(),
         }));
     }
     if cli.list_devices {
@@ -158,7 +181,7 @@ fn main() -> Result<()> {
     }
 
     let cfg = Config::resolve(&cli, &matches)?;
-    let injector = Injector::spawn(cfg.paste_shift, cfg.type_hybrid)?;
+    let injector = Injector::spawn(&cfg)?;
 
     // Background Tokio runtime for audio + the WebSocket. Kept alive for the
     // whole program (the UI below never returns).
@@ -207,25 +230,42 @@ async fn manager(
     };
 
     while let Some(msg) = rx.recv().await {
+        // A session that already finished (error or clean close) is not "active".
+        let active = current.as_ref().is_some_and(|(_, h)| !h.is_finished());
         match msg {
-            // Paused suspends the hotkey: toggles are ignored until resumed.
-            Control::Toggle if paused => {}
-            Control::Toggle => match current.take() {
-                Some(pair) if !pair.1.is_finished() => stop_session(pair),
-                _ => {
-                    current = Some(start_session(&cfg, &injector, &state_tx));
-                }
-            },
-            Control::KeyDown => {
-                // Hold mode: start only if not already recording.
-                if current.as_ref().map_or(true, |(_, h)| h.is_finished()) {
+            // Stopping is always allowed; starting is blocked while paused.
+            Control::Toggle => {
+                if active {
+                    if let Some(pair) = current.take() {
+                        stop_session(pair);
+                    }
+                } else if !paused {
                     current = Some(start_session(&cfg, &injector, &state_tx));
                 }
             }
+            // Raw hotkey press, interpreted against the live recording mode.
+            Control::KeyDown => match cfg.mode {
+                config::RecordingMode::Toggle => {
+                    if active {
+                        if let Some(pair) = current.take() {
+                            stop_session(pair);
+                        }
+                    } else if !paused {
+                        current = Some(start_session(&cfg, &injector, &state_tx));
+                    }
+                }
+                config::RecordingMode::Hold => {
+                    if !active && !paused {
+                        current = Some(start_session(&cfg, &injector, &state_tx));
+                    }
+                }
+            },
+            // Raw hotkey release: only meaningful in hold mode.
             Control::KeyUp => {
-                // Hold mode: stop the active session.
-                if let Some(pair) = current.take() {
-                    stop_session(pair);
+                if cfg.mode == config::RecordingMode::Hold {
+                    if let Some(pair) = current.take() {
+                        stop_session(pair);
+                    }
                 }
             }
             // Apply to the live config so the next session uses it, and persist
@@ -352,7 +392,8 @@ struct DitTray {
     device: Option<String>,
     language: String,
     no_filler: bool,
-    model: String,
+    engine: config::Engine,
+    mode: config::RecordingMode,
     paused: bool,
     /// Input devices to offer, captured once at startup.
     devices: Vec<String>,
@@ -415,7 +456,8 @@ impl ksni::Tray for DitTray {
                         devices.get(idx - 1).cloned()
                     };
                     t.device = dev.clone();
-                    let _ = t.tx.send(Control::Reconfigure(config::Reconfigure::Device(dev)));
+                    let _ =
+                        t.tx.send(Control::Reconfigure(config::Reconfigure::Device(dev)));
                 }),
                 options: device_opts,
             }
@@ -435,9 +477,10 @@ impl ksni::Tray for DitTray {
                 select: Box::new(|t: &mut DitTray, idx: usize| {
                     if let Some((_, code)) = LANGUAGE_PRESETS.get(idx) {
                         t.language = (*code).into();
-                        let _ = t.tx.send(Control::Reconfigure(
-                            config::Reconfigure::Language((*code).into()),
-                        ));
+                        let _ =
+                            t.tx.send(Control::Reconfigure(config::Reconfigure::Language(
+                                (*code).into(),
+                            )));
                     }
                 }),
                 options: LANGUAGE_PRESETS
@@ -452,24 +495,23 @@ impl ksni::Tray for DitTray {
             ..Default::default()
         };
 
-        // ── Mode submenu (verbatim vs. filler removal) ──
-        let mode_selected = MODE_PRESETS
+        // ── Mode submenu (toggle vs. hold, applied live by the manager) ──
+        let mode_selected = RECORDING_MODE_PRESETS
             .iter()
-            .position(|(_, nf)| *nf == self.no_filler)
+            .position(|(_, m)| *m == self.mode)
             .unwrap_or(usize::MAX);
         let mode_menu = SubMenu {
             label: "Mode".into(),
             submenu: vec![RadioGroup {
                 selected: mode_selected,
                 select: Box::new(|t: &mut DitTray, idx: usize| {
-                    if let Some((_, nf)) = MODE_PRESETS.get(idx) {
-                        t.no_filler = *nf;
-                        let _ = t
-                            .tx
-                            .send(Control::Reconfigure(config::Reconfigure::NoFiller(*nf)));
+                    if let Some((_, m)) = RECORDING_MODE_PRESETS.get(idx) {
+                        t.mode = *m;
+                        let _ =
+                            t.tx.send(Control::Reconfigure(config::Reconfigure::Mode(*m)));
                     }
                 }),
-                options: MODE_PRESETS
+                options: RECORDING_MODE_PRESETS
                     .iter()
                     .map(|(label, _)| RadioItem {
                         label: (*label).into(),
@@ -481,21 +523,48 @@ impl ksni::Tray for DitTray {
             ..Default::default()
         };
 
-        // ── Engine submenu (speech-to-text model) ──
+        // ── Transcript submenu (verbatim vs. filler removal) ──
+        let filler_selected = FILLER_PRESETS
+            .iter()
+            .position(|(_, nf)| *nf == self.no_filler)
+            .unwrap_or(usize::MAX);
+        let filler_menu = SubMenu {
+            label: "Transcript".into(),
+            submenu: vec![RadioGroup {
+                selected: filler_selected,
+                select: Box::new(|t: &mut DitTray, idx: usize| {
+                    if let Some((_, nf)) = FILLER_PRESETS.get(idx) {
+                        t.no_filler = *nf;
+                        let _ =
+                            t.tx.send(Control::Reconfigure(config::Reconfigure::NoFiller(*nf)));
+                    }
+                }),
+                options: FILLER_PRESETS
+                    .iter()
+                    .map(|(label, _)| RadioItem {
+                        label: (*label).into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            }
+            .into()],
+            ..Default::default()
+        };
+
+        // ── Engine submenu (cloud vs. local backend) ──
         let engine_selected = ENGINE_PRESETS
             .iter()
-            .position(|(_, id)| *id == self.model)
+            .position(|(_, e)| *e == self.engine)
             .unwrap_or(usize::MAX);
         let engine_menu = SubMenu {
             label: "Engine".into(),
             submenu: vec![RadioGroup {
                 selected: engine_selected,
                 select: Box::new(|t: &mut DitTray, idx: usize| {
-                    if let Some((_, id)) = ENGINE_PRESETS.get(idx) {
-                        t.model = (*id).into();
-                        let _ = t
-                            .tx
-                            .send(Control::Reconfigure(config::Reconfigure::Model((*id).into())));
+                    if let Some((_, e)) = ENGINE_PRESETS.get(idx) {
+                        t.engine = *e;
+                        let _ =
+                            t.tx.send(Control::Reconfigure(config::Reconfigure::Engine(*e)));
                     }
                 }),
                 options: ENGINE_PRESETS
@@ -541,6 +610,7 @@ impl ksni::Tray for DitTray {
             device_menu.into(),
             language_menu.into(),
             mode_menu.into(),
+            filler_menu.into(),
             engine_menu.into(),
             MenuItem::Separator,
         ];
@@ -590,7 +660,8 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
             device: tray_cfg.device.clone(),
             language: tray_cfg.language.clone(),
             no_filler: tray_cfg.no_filler,
-            model: tray_cfg.model.clone(),
+            engine: tray_cfg.engine,
+            mode: tray_cfg.mode,
             paused: false,
             devices,
         })
@@ -613,7 +684,7 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
     // Hotkey via evdev (/dev/input) — works on X11 and Wayland alike.
     match linux_input::evdev_binding(&cfg.hotkey) {
         Ok(binding) => {
-            if let Err(e) = linux_input::spawn_hotkey(binding, tx, cfg.mode) {
+            if let Err(e) = linux_input::spawn_hotkey(binding, tx) {
                 error!("{e:#}");
                 notify::notify("dit — hotkey unavailable", &format!("{e}"));
             }
@@ -729,7 +800,9 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
     use std::time::{Duration, Instant};
     use tao::event::Event;
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
-    use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+    use tray_icon::menu::{
+        CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
+    };
     use tray_icon::{Icon, TrayIconBuilder};
 
     /// One selectable runtime-knob option in a tray submenu, paired with the
@@ -785,7 +858,8 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
     const G_DEVICE: u8 = 0;
     const G_LANGUAGE: u8 = 1;
     const G_MODE: u8 = 2;
-    const G_ENGINE: u8 = 3;
+    const G_FILLER: u8 = 3;
+    const G_ENGINE: u8 = 4;
 
     let device_menu = Submenu::new("Device", true);
     {
@@ -823,25 +897,37 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
     }
 
     let mode_menu = Submenu::new("Mode", true);
-    for (label, nf) in MODE_PRESETS {
-        let item = CheckMenuItem::new(*label, true, cfg.no_filler == *nf, None);
+    for (label, m) in RECORDING_MODE_PRESETS {
+        let item = CheckMenuItem::new(*label, true, cfg.mode == *m, None);
         mode_menu.append(&item).ok();
         opts.push(OptionItem {
             id: item.id().clone(),
             group: G_MODE,
+            reconfig: config::Reconfigure::Mode(*m),
+            item,
+        });
+    }
+
+    let filler_menu = Submenu::new("Transcript", true);
+    for (label, nf) in FILLER_PRESETS {
+        let item = CheckMenuItem::new(*label, true, cfg.no_filler == *nf, None);
+        filler_menu.append(&item).ok();
+        opts.push(OptionItem {
+            id: item.id().clone(),
+            group: G_FILLER,
             reconfig: config::Reconfigure::NoFiller(*nf),
             item,
         });
     }
 
     let engine_menu = Submenu::new("Engine", true);
-    for (label, id) in ENGINE_PRESETS {
-        let item = CheckMenuItem::new(*label, true, cfg.model == *id, None);
+    for (label, e) in ENGINE_PRESETS {
+        let item = CheckMenuItem::new(*label, true, cfg.engine == *e, None);
         engine_menu.append(&item).ok();
         opts.push(OptionItem {
             id: item.id().clone(),
             group: G_ENGINE,
-            reconfig: config::Reconfigure::Model((*id).into()),
+            reconfig: config::Reconfigure::Engine(*e),
             item,
         });
     }
@@ -854,6 +940,7 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
     menu.append(&device_menu).ok();
     menu.append(&language_menu).ok();
     menu.append(&mode_menu).ok();
+    menu.append(&filler_menu).ok();
     menu.append(&engine_menu).ok();
     menu.append(&PredefinedMenuItem::separator()).ok();
     #[cfg(feature = "gui")]
@@ -887,20 +974,13 @@ fn run_ui(cfg: Config, injector: Injector, rt: tokio::runtime::Runtime) -> Resul
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100));
 
         if let Ok(ev) = hotkey_rx.try_recv() {
+            // Raw press/release; the manager interprets toggle-vs-hold against
+            // the live recording mode.
             if ev.id == hotkey_id {
-                match cfg.mode {
-                    config::RecordingMode::Toggle => {
-                        if ev.state == HotKeyState::Pressed {
-                            let _ = tx.send(Control::Toggle);
-                        }
-                    }
-                    config::RecordingMode::Hold => {
-                        if ev.state == HotKeyState::Pressed {
-                            let _ = tx.send(Control::KeyDown);
-                        } else if ev.state == HotKeyState::Released {
-                            let _ = tx.send(Control::KeyUp);
-                        }
-                    }
+                if ev.state == HotKeyState::Pressed {
+                    let _ = tx.send(Control::KeyDown);
+                } else if ev.state == HotKeyState::Released {
+                    let _ = tx.send(Control::KeyUp);
                 }
             }
         }

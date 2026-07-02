@@ -3,80 +3,92 @@
 //! Compiled only with `--features local`. Accumulates PCM while the user
 //! records, then runs quantised Whisper inference via candle and injects the
 //! transcript. No API key or network required.
+//!
+//! Audio of any length is handled by splitting it into Whisper's native 30 s
+//! windows and transcribing them in sequence with the same loaded model, so
+//! nothing said is dropped. A window boundary can split a word; for dictation
+//! the trade-off (rare clipped word vs. silently losing everything past 30 s)
+//! is the right one.
 
-use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use tokio::sync::{mpsc, Notify};
-use tokio::time::timeout;
 use tracing::{info, warn};
 
 use candle_core::{Device, Tensor};
-use candle_core::quantized::gguf_file;
-use candle_transformers::quantized_var_builder;
 use candle_transformers::models::whisper::{audio, quantized_model, Config as WhisperConfig};
+use candle_transformers::quantized_var_builder;
 
-use crate::audio::{CaptureEvent, Resampler};
+use crate::audio::{drain_capture, AudioLevel, CaptureEvent, Resampler};
 use crate::config::{Config, SAMPLE_RATE};
 use crate::engine::Transcriber;
 use crate::inject::Injector;
+use crate::models::{LocalModel, LocalModelKind};
 use crate::notify::notify;
 use crate::output::SessionLog;
 use crate::IconState;
 
 // Whisper STFT parameters (fixed in candle's audio module).
-const N_FFT: usize = 400;
 const HOP_LENGTH: usize = 160;
 const N_MELS: usize = 80;
-// 30 s at 10 ms hop = 3000 frames (Whisper's hard limit).
+// 30 s at 10 ms hop = 3000 frames (Whisper's per-window limit).
 const WHISPER_MEL_FRAMES: usize = 3000;
-const WHISPER_MAX_SAMPLES: usize = WHISPER_MEL_FRAMES * HOP_LENGTH; // 480 000
+const WHISPER_WINDOW_SAMPLES: usize = WHISPER_MEL_FRAMES * HOP_LENGTH; // 480 000
 
 // Whisper multilingual special tokens.
 const SOT: u32 = 50258;
 const EOT: u32 = 50256;
 const TRANSCRIBE: u32 = 50359;
 const NO_TIMESTAMPS: u32 = 50363;
-// Language tokens occupy 50259..=50357 (99 languages, Whisper multilingual).
+// Language tokens occupy 50259..=50357, in the order of `WHISPER_LANGUAGES`.
 const LANG_TOK_START: u32 = 50259;
 const LANG_TOK_END: u32 = 50357;
+// Everything from 50257 up is a special/added token, never plain text.
+const FIRST_SPECIAL_TOKEN: u32 = 50257;
 
+/// The 99 languages of multilingual Whisper, in language-token order:
+/// `WHISPER_LANGUAGES[i]` has token id `LANG_TOK_START + i`.
+const WHISPER_LANGUAGES: &[&str] = &[
+    "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca", "nl", "ar", "sv", "it",
+    "id", "hi", "fi", "vi", "he", "uk", "el", "ms", "cs", "ro", "da", "hu", "ta", "no", "th", "ur",
+    "hr", "bg", "lt", "la", "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn", "sr", "az", "sl", "kn",
+    "et", "mk", "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw", "gl", "mr", "pa", "si",
+    "km", "sn", "yo", "so", "af", "oc", "ka", "be", "tg", "sd", "gu", "am", "yi", "lo", "uz", "fo",
+    "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl", "mg", "as", "tt", "haw", "ln",
+    "ha", "ba", "jw", "su",
+];
+
+/// The precomputed slaney-normalised mel filterbank Whisper was trained with
+/// (80 mels × 201 FFT bins of little-endian f32), taken verbatim from candle's
+/// whisper example. Embedding the known-good table avoids drifting from the
+/// reference implementation.
+const MEL_FILTERS_BYTES: &[u8] = include_bytes!("melfilters.bytes");
+
+/// Token id for a language code, or the `pt` token (dit's default language)
+/// with a warning when the code isn't one Whisper knows.
 fn language_token(lang: &str) -> u32 {
-    match lang {
-        "en" => 50259,
-        "zh" => 50260,
-        "de" => 50261,
-        "es" => 50262,
-        "ru" => 50263,
-        "ko" => 50264,
-        "fr" => 50265,
-        "ja" => 50266,
-        "pt" => 50267,
-        "tr" => 50268,
-        "pl" => 50269,
-        "ca" => 50270,
-        "nl" => 50271,
-        "ar" => 50272,
-        "sv" => 50273,
-        "it" => 50274,
-        _ => 50267, // default: pt
+    match WHISPER_LANGUAGES.iter().position(|&l| l == lang) {
+        Some(i) => LANG_TOK_START + i as u32,
+        None => {
+            warn!("local: Whisper has no language {lang:?}; falling back to pt");
+            language_token("pt")
+        }
     }
 }
 
 /// Offline Whisper engine. Accumulates PCM during recording then runs batch
 /// inference via `spawn_blocking`.
 pub struct LocalEngine {
-    pub model_path: PathBuf,
+    model: LocalModel,
 }
 
 impl LocalEngine {
-    pub fn new(model_path: PathBuf) -> Self {
-        Self { model_path }
+    pub fn new(model: LocalModel) -> Self {
+        Self { model }
     }
 }
 
@@ -93,15 +105,15 @@ impl Transcriber for LocalEngine {
     ) -> Result<()> {
         let mut resampler = Resampler::new(native_rate, SAMPLE_RATE);
         // Accumulate resampled i16 LE bytes.
-        let mut raw_pcm: Vec<u8> = Vec::with_capacity(WHISPER_MAX_SAMPLES * 2);
+        let mut raw_pcm: Vec<u8> = Vec::with_capacity(WHISPER_WINDOW_SAMPLES * 2);
 
-        notify("🎙️ Dictating (offline)…", "Speak — press the hotkey again to stop");
+        notify(
+            "🎙️ Dictating (offline)…",
+            "Speak — press the hotkey again to stop",
+        );
         info!("local session started (mic {native_rate} Hz → {SAMPLE_RATE} Hz)");
 
-        let mut sumsq = 0.0f64;
-        let mut n_level = 0usize;
-        let mut last_emit = std::time::Instant::now();
-
+        let mut level = AudioLevel::default();
         loop {
             tokio::select! {
                 _ = stop.notified() => break,
@@ -110,17 +122,10 @@ impl Transcriber for LocalEngine {
                         resampler = Resampler::new(sample_rate, SAMPLE_RATE);
                     }
                     Some(CaptureEvent::Samples(frame)) => {
-                        for &s in &frame {
-                            sumsq += (s as f64) * (s as f64);
-                            n_level += 1;
-                        }
+                        level.add(&frame);
                         resampler.push(&frame, &mut raw_pcm);
-                        if last_emit.elapsed() >= Duration::from_millis(200) && n_level > 0 {
-                            let rms = (sumsq / n_level as f64).sqrt();
-                            let _ = state.send(IconState::Recording { level: vu_level(rms) });
-                            sumsq = 0.0;
-                            n_level = 0;
-                            last_emit = std::time::Instant::now();
+                        if let Some(lv) = level.maybe_emit() {
+                            let _ = state.send(IconState::Recording { level: lv });
                         }
                     }
                     None => break,
@@ -128,18 +133,7 @@ impl Transcriber for LocalEngine {
             }
         }
         audio_stop.store(true, Ordering::Relaxed);
-
-        // Drain buffered frames.
-        while let Ok(Some(ev)) = timeout(Duration::from_millis(50), audio.recv()).await {
-            match ev {
-                CaptureEvent::Format { sample_rate } => {
-                    resampler = Resampler::new(sample_rate, SAMPLE_RATE);
-                }
-                CaptureEvent::Samples(frame) => {
-                    resampler.push(&frame, &mut raw_pcm);
-                }
-            }
-        }
+        drain_capture(&mut audio, &mut resampler, &mut raw_pcm).await;
 
         if raw_pcm.is_empty() {
             info!("local: no audio captured — skipping inference");
@@ -149,16 +143,15 @@ impl Transcriber for LocalEngine {
         let dur = raw_pcm.len() as f64 / (SAMPLE_RATE as f64 * 2.0);
         info!("local: captured {dur:.1}s — running Whisper inference …");
 
-        let model_path = self.model_path.clone();
+        let model = self.model.clone();
         let language = cfg.language.clone();
         let session_max_age_days = cfg.session_max_age_days;
         let session_max_count = cfg.session_max_count;
 
-        let transcript = tokio::task::spawn_blocking(move || {
-            transcribe_blocking(&model_path, raw_pcm, &language)
-        })
-        .await
-        .context("inference task panicked")??;
+        let transcript =
+            tokio::task::spawn_blocking(move || transcribe_blocking(&model, raw_pcm, &language))
+                .await
+                .context("inference task panicked")??;
 
         if transcript.is_empty() {
             info!("local: inference produced no text");
@@ -172,11 +165,11 @@ impl Transcriber for LocalEngine {
         Ok(())
     }
 
-    async fn transcribe_batch(&self, pcm: Vec<i16>, language: &str) -> Result<String> {
+    async fn transcribe_batch(&self, cfg: &Config, pcm: Vec<i16>) -> Result<String> {
         let raw: Vec<u8> = pcm.iter().flat_map(|&s| s.to_le_bytes()).collect();
-        let model_path = self.model_path.clone();
-        let lang = language.to_string();
-        tokio::task::spawn_blocking(move || transcribe_blocking(&model_path, raw, &lang))
+        let model = self.model.clone();
+        let language = cfg.language.clone();
+        tokio::task::spawn_blocking(move || transcribe_blocking(&model, raw, &language))
             .await
             .context("inference task panicked")?
     }
@@ -184,129 +177,179 @@ impl Transcriber for LocalEngine {
 
 // ── Blocking inference ────────────────────────────────────────────────────────
 
-fn transcribe_blocking(model_path: &PathBuf, raw_pcm: Vec<u8>, language: &str) -> Result<String> {
+/// Transcribe raw s16le PCM (16 kHz mono) of any length: load the model once,
+/// then run each 30 s window through encode → greedy decode and join the texts.
+fn transcribe_blocking(model: &LocalModel, raw_pcm: Vec<u8>, language: &str) -> Result<String> {
     let device = Device::Cpu;
-    let config = whisper_config(model_path);
-    let vocab = load_gguf_vocab(model_path).unwrap_or_default();
+    let config = whisper_config(model.kind);
+    let vocab = load_tokenizer_vocab(model)?;
+    let mel_filters = load_mel_filters();
 
-    let vb = quantized_var_builder::VarBuilder::from_gguf(model_path, &device)
+    let vb = quantized_var_builder::VarBuilder::from_gguf(&model.path, &device)
         .context("loading GGUF model weights")?;
-    let mut model = quantized_model::Whisper::load(&vb, config.clone())
-        .context("building Whisper model")?;
+    let mut whisper =
+        quantized_model::Whisper::load(&vb, config.clone()).context("building Whisper model")?;
 
     // Convert i16 LE bytes → normalised f32.
-    let mut samples: Vec<f32> = raw_pcm
+    let samples: Vec<f32> = raw_pcm
         .chunks_exact(2)
         .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
         .collect();
-    // Pad to exactly 30 s so the encoder sees a full receptive field.
-    if samples.len() < WHISPER_MAX_SAMPLES {
-        samples.resize(WHISPER_MAX_SAMPLES, 0.0);
-    } else {
-        samples.truncate(WHISPER_MAX_SAMPLES);
+
+    let windows = samples.len().div_ceil(WHISPER_WINDOW_SAMPLES).max(1);
+    // "auto" resolves once, on the first window, and sticks for the rest.
+    let mut lang_tok: Option<u32> = (language != "auto").then(|| language_token(language));
+    let mut parts: Vec<String> = Vec::new();
+
+    for (i, chunk) in samples.chunks(WHISPER_WINDOW_SAMPLES).enumerate() {
+        // Pad to exactly 30 s so the encoder sees a full receptive field.
+        let mut window = chunk.to_vec();
+        window.resize(WHISPER_WINDOW_SAMPLES, 0.0);
+
+        let mel_flat = audio::pcm_to_mel(&config, &window, &mel_filters);
+        let mel_frames = mel_flat.len() / N_MELS;
+        let mel =
+            Tensor::from_vec(mel_flat, (1, N_MELS, mel_frames), &device).context("mel tensor")?;
+        let features = whisper.encoder.forward(&mel, true).context("encoder")?;
+
+        let tok = match lang_tok {
+            Some(t) => t,
+            None => {
+                let detected = detect_language(&mut whisper, &features, &device)?;
+                let code = WHISPER_LANGUAGES
+                    .get((detected - LANG_TOK_START) as usize)
+                    .copied()
+                    .unwrap_or("?");
+                info!("local: auto-detected language {code:?} (token {detected})");
+                lang_tok = Some(detected);
+                detected
+            }
+        };
+
+        let text = decode_window(&mut whisper, &features, tok, &config, &vocab, &device)?;
+        if windows > 1 {
+            info!("local: window {}/{windows} done", i + 1);
+        }
+        if !text.is_empty() {
+            parts.push(text);
+        }
     }
 
-    // Mel spectrogram.
-    let mel_filters = compute_mel_filters(SAMPLE_RATE as usize, N_FFT, N_MELS);
-    let mel_flat = audio::pcm_to_mel(&config, &samples, &mel_filters);
-    let mel_frames = mel_flat.len() / N_MELS;
-    let mel = Tensor::from_vec(mel_flat, (1, N_MELS, mel_frames), &device)
-        .context("mel tensor")?;
+    Ok(parts.join(" "))
+}
 
-    // Encode.
-    let features = model.encoder.forward(&mel, true).context("encoder")?;
+/// One decoder forward pass with `[SOT]`, argmax over the language-token range.
+fn detect_language(
+    whisper: &mut quantized_model::Whisper,
+    features: &Tensor,
+    device: &Device,
+) -> Result<u32> {
+    let sot_in = Tensor::from_slice(&[SOT], (1, 1), device).context("sot tensor")?;
+    let logits = whisper
+        .decoder
+        .forward(&sot_in, features, true)
+        .context("lang detect")?;
+    let last = logits.get(0)?.get(0)?;
+    let lang_range = (LANG_TOK_END - LANG_TOK_START + 1) as usize;
+    let lang_logits = last
+        .narrow(0, LANG_TOK_START as usize, lang_range)
+        .context("lang slice")?;
+    let detected = lang_logits
+        .argmax(0)?
+        .to_scalar::<u32>()
+        .context("lang argmax")?
+        + LANG_TOK_START;
+    Ok(detected)
+}
 
-    // Greedy decode (full-sequence, no incremental KV cache).
-    let lang_tok = if language == "auto" {
-        // Detect language: one forward pass with [SOT], argmax over language token range.
-        let sot_in = Tensor::from_slice(&[SOT], (1, 1), &device).context("sot tensor")?;
-        let logits = model.decoder.forward(&sot_in, &features, true).context("lang detect")?;
-        let last = logits.get(0)?.get(0)?;
-        let lang_range = (LANG_TOK_END - LANG_TOK_START + 1) as usize;
-        let lang_logits = last.narrow(0, LANG_TOK_START as usize, lang_range).context("lang slice")?;
-        let detected = lang_logits.argmax(0)?.to_scalar::<u32>().context("lang argmax")? + LANG_TOK_START;
-        info!("local: auto-detected language token {detected}");
-        detected
-    } else {
-        language_token(language)
-    };
+/// Greedy decode of one encoded 30 s window (full-sequence, no incremental KV
+/// cache — simple and correct, at the cost of extra compute on long outputs).
+fn decode_window(
+    whisper: &mut quantized_model::Whisper,
+    features: &Tensor,
+    lang_tok: u32,
+    config: &WhisperConfig,
+    vocab: &[String],
+    device: &Device,
+) -> Result<String> {
     let mut tokens: Vec<u32> = vec![SOT, lang_tok, TRANSCRIBE, NO_TIMESTAMPS];
     let mut output: Vec<u32> = vec![];
 
     for _ in 0..config.max_target_positions {
-        let t_in = Tensor::from_slice(tokens.as_slice(), (1, tokens.len()), &device)
+        let t_in = Tensor::from_slice(tokens.as_slice(), (1, tokens.len()), device)
             .context("decoder input")?;
-        let logits = model.decoder.forward(&t_in, &features, true).context("decoder")?;
+        let logits = whisper
+            .decoder
+            .forward(&t_in, features, true)
+            .context("decoder")?;
         // logits: (1, seq_len, vocab_size) → pick last position.
         let last = logits.get(0)?.get(tokens.len() - 1)?;
         let next = last.argmax(0)?.to_scalar::<u32>().context("argmax")?;
         if next == EOT {
             break;
         }
-        // Skip timestamp tokens (50364+) — we requested NO_TIMESTAMPS but guard anyway.
-        if next < 50257 {
+        // Special tokens (timestamps etc.) are decoder state, not text.
+        if next < FIRST_SPECIAL_TOKEN {
             output.push(next);
         }
         tokens.push(next);
-        if output.len() >= config.max_target_positions {
+        if tokens.len() >= config.max_target_positions {
             warn!("local: decoder hit max length without EOT");
             break;
         }
     }
 
-    Ok(decode_tokens(&output, &vocab).trim().to_string())
+    Ok(decode_tokens(&output, vocab).trim().to_string())
 }
 
 // ── Model config ──────────────────────────────────────────────────────────────
 
-fn whisper_config(model_path: &PathBuf) -> WhisperConfig {
-    let is_base = model_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("")
-        .contains("base");
-
-    if is_base {
-        serde_json::from_str(r#"{
-            "num_mel_bins": 80, "max_source_positions": 1500, "d_model": 512,
-            "encoder_attention_heads": 8, "encoder_layers": 6,
-            "decoder_attention_heads": 8, "decoder_layers": 6,
-            "vocab_size": 51865, "max_target_positions": 448
-        }"#)
-        .expect("base config")
-    } else {
-        serde_json::from_str(r#"{
+/// Whisper dimensions for each supported local model. Kept in code (rather
+/// than downloading a config.json) so the engine and the model catalog can't
+/// disagree about what a model id means.
+fn whisper_config(kind: LocalModelKind) -> WhisperConfig {
+    match kind {
+        LocalModelKind::Tiny => serde_json::from_str(
+            r#"{
             "num_mel_bins": 80, "max_source_positions": 1500, "d_model": 384,
             "encoder_attention_heads": 6, "encoder_layers": 4,
             "decoder_attention_heads": 6, "decoder_layers": 4,
             "vocab_size": 51865, "max_target_positions": 448
-        }"#)
-        .expect("tiny config")
+        }"#,
+        )
+        .expect("tiny config"),
     }
 }
 
 // ── Vocabulary ────────────────────────────────────────────────────────────────
 
-fn load_gguf_vocab(model_path: &PathBuf) -> Result<Vec<String>> {
-    let mut f = std::fs::File::open(model_path)
-        .with_context(|| format!("opening {}", model_path.display()))?;
-    let content = gguf_file::Content::read(&mut f).context("reading GGUF metadata")?;
-    match content.metadata.get("tokenizer.ggml.tokens") {
-        Some(gguf_file::Value::Array(items)) => {
-            let vocab: Vec<String> = items
-                .iter()
-                .filter_map(|v| {
-                    if let gguf_file::Value::String(s) = v {
-                        Some(s.to_string())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            Ok(vocab)
+/// Load the id → token table from the HuggingFace `tokenizer.json` that ships
+/// alongside the GGUF weights. Only plain-text tokens (< 50257) matter here;
+/// special/added tokens are filtered out during decoding anyway.
+fn load_tokenizer_vocab(model: &LocalModel) -> Result<Vec<String>> {
+    let contents = std::fs::read_to_string(&model.tokenizer)
+        .with_context(|| format!("reading {}", model.tokenizer.display()))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&contents).context("parsing tokenizer.json")?;
+    let Some(map) = json
+        .get("model")
+        .and_then(|m| m.get("vocab"))
+        .and_then(|v| v.as_object())
+    else {
+        bail!(
+            "no model.vocab table in {} — re-download with `dit models download`",
+            model.tokenizer.display()
+        );
+    };
+    let mut vocab = vec![String::new(); FIRST_SPECIAL_TOKEN as usize];
+    for (token, id) in map {
+        if let Some(id) = id.as_u64() {
+            if (id as usize) < vocab.len() {
+                vocab[id as usize] = token.clone();
+            }
         }
-        _ => bail!("tokenizer.ggml.tokens not found in GGUF metadata"),
     }
+    Ok(vocab)
 }
 
 fn decode_tokens(tokens: &[u32], vocab: &[String]) -> String {
@@ -353,47 +396,49 @@ fn build_unicode_to_byte_map() -> std::collections::HashMap<char, u8> {
 
 // ── Mel filterbank ────────────────────────────────────────────────────────────
 
-fn compute_mel_filters(sample_rate: usize, n_fft: usize, n_mels: usize) -> Vec<f32> {
-    let fmax = sample_rate as f64 / 2.0;
-    let n_freqs = n_fft / 2 + 1;
-
-    let hz_to_mel = |hz: f64| 2595.0 * (1.0 + hz / 700.0).log10();
-    let mel_to_hz = |mel: f64| 700.0 * (10.0f64.powf(mel / 2595.0) - 1.0);
-
-    let mel_min = hz_to_mel(0.0);
-    let mel_max = hz_to_mel(fmax);
-
-    let mel_pts: Vec<f64> = (0..=n_mels + 1)
-        .map(|i| mel_min + (mel_max - mel_min) * i as f64 / (n_mels + 1) as f64)
-        .collect();
-    let bin_pts: Vec<f64> = mel_pts
-        .iter()
-        .map(|&m| mel_to_hz(m) * (n_fft as f64 + 1.0) / sample_rate as f64)
-        .collect();
-
-    let mut filters = vec![0.0f32; n_mels * n_freqs];
-    for m in 0..n_mels {
-        let (f0, f1, f2) = (bin_pts[m], bin_pts[m + 1], bin_pts[m + 2]);
-        for ki in 0..n_freqs {
-            let k = ki as f64;
-            let w = if k < f0 || k > f2 {
-                0.0
-            } else if k <= f1 {
-                (k - f0) / (f1 - f0)
-            } else {
-                (f2 - k) / (f2 - f1)
-            };
-            filters[m * n_freqs + ki] = w as f32;
-        }
-    }
-    filters
+/// Decode the embedded filterbank into the `Vec<f32>` candle expects.
+fn load_mel_filters() -> Vec<f32> {
+    MEL_FILTERS_BYTES
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }
 
-// ── Utilities ─────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn vu_level(rms: f64) -> u8 {
-    if rms <= 0.0005 {
-        return 0;
+    #[test]
+    fn language_tokens_cover_all_99_whisper_languages() {
+        assert_eq!(WHISPER_LANGUAGES.len(), 99);
+        assert_eq!(
+            LANG_TOK_START + (WHISPER_LANGUAGES.len() as u32 - 1),
+            LANG_TOK_END
+        );
+        // Anchor a few well-known assignments.
+        assert_eq!(language_token("en"), 50259);
+        assert_eq!(language_token("pt"), 50267);
+        assert_eq!(language_token("su"), LANG_TOK_END);
+        // Unknown codes fall back to pt (with a warning).
+        assert_eq!(language_token("xx"), language_token("pt"));
     }
-    ((rms.min(0.20) / 0.20).sqrt() * 255.0).round() as u8
+
+    #[test]
+    fn embedded_mel_filterbank_has_whisper_dimensions() {
+        let filters = load_mel_filters();
+        // 80 mel bands × 201 FFT bins.
+        assert_eq!(filters.len(), 80 * 201);
+        // A real filterbank is sparse but not empty.
+        assert!(filters.iter().any(|&f| f > 0.0));
+        assert!(filters.iter().all(|&f| f.is_finite()));
+    }
+
+    #[test]
+    fn byte_level_bpe_roundtrips_ascii_and_utf8() {
+        let map = build_unicode_to_byte_map();
+        assert_eq!(map.len(), 256);
+        // 'a' maps to itself; the space marker 'Ġ' (U+0120) maps to 0x20.
+        assert_eq!(map.get(&'a'), Some(&b'a'));
+        assert_eq!(map.get(&'\u{120}'), Some(&0x20));
+    }
 }

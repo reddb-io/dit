@@ -69,14 +69,17 @@ async fn session_inner(
         Engine::Local => {
             use crate::engine::LocalEngine;
             use crate::models::resolve_local_model;
-            let model_path = resolve_local_model(&cfg.model).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "local model {:?} not found — run `dit models download {}` first",
-                    cfg.model, cfg.model
+            let model = resolve_local_model(&cfg.model)?;
+            LocalEngine::new(model)
+                .run_stream(
+                    &cfg,
+                    injector,
+                    samples_rx,
+                    audio_stop,
+                    native_rate,
+                    stop,
+                    state,
                 )
-            })?;
-            LocalEngine::new(model_path)
-                .run_stream(&cfg, injector, samples_rx, audio_stop, native_rate, stop, state)
                 .await
         }
         #[cfg(not(feature = "local"))]
@@ -84,8 +87,16 @@ async fn session_inner(
             anyhow::bail!("dit was built without --features local; rebuild with `cargo build --features local`")
         }
         Engine::Cloud => {
-            ScribeEngine::default()
-                .run_stream(&cfg, injector, samples_rx, audio_stop, native_rate, stop, state)
+            ScribeEngine
+                .run_stream(
+                    &cfg,
+                    injector,
+                    samples_rx,
+                    audio_stop,
+                    native_rate,
+                    stop,
+                    state,
+                )
                 .await
         }
     }
