@@ -18,13 +18,13 @@
 
 It supports two transcription engines:
 
-- **Cloud** (default) — streams your mic to [ElevenLabs Scribe v2 Realtime](https://elevenlabs.io/docs/api-reference/speech-to-text), real-time word-by-word delivery
+- **ElevenLabs** (default, `--engine elevenlabs`) — streams your mic to [ElevenLabs Scribe v2 Realtime](https://elevenlabs.io/docs/api-reference/speech-to-text), real-time word-by-word delivery. (`--engine cloud` still works as an alias.)
 - **Local** (`--engine local`) — records while you hold/toggle the key, then transcribes fully **offline** with a [Whisper](https://openai.com/research/whisper) model (pure-Rust via `candle`). No API key, no network, no cost per use.
 
 It's a single static binary written in Rust, identical on **Linux, macOS and Windows**.
 
 ```
-── Cloud ──────────────────────────────────────────────────────────────────
+── ElevenLabs ─────────────────────────────────────────────────────────────
 mic ──► resample 16 kHz ──► WebSocket ──► Scribe v2 Realtime
                                                  │
                       committed_transcript ◄──────┘
@@ -96,7 +96,7 @@ Every asset ships a `.sha256` sidecar — verify with `shasum -a 256 -c dit-<ass
 ### Build from source
 
 ```bash
-cargo build --release                        # cloud-only (lean)
+cargo build --release                        # ElevenLabs-only (lean)
 cargo build --release --features local       # add local Whisper engine
 cargo build --release --features gui         # add settings GUI
 cargo build --release --features local,gui   # everything (release default)
@@ -116,7 +116,7 @@ sudo apt-get install -y libxkbcommon-dev libgl1-mesa-dev
 
 ## Configure
 
-### Cloud engine (ElevenLabs API key)
+### ElevenLabs engine (API key)
 
 ```bash
 echo 'ELEVENLABS_API_KEY=sk_your_key_here' > ~/.dit.env
@@ -130,7 +130,7 @@ All CLI flags can be persisted:
 
 ```toml
 language = "pt"
-engine = "cloud"
+engine = "elevenlabs"
 mode = "toggle"
 hotkey = "F9"
 no_filler = false
@@ -143,7 +143,7 @@ no_filler = false
 ## Use
 
 ```bash
-dit                                   # cloud engine, F9 toggle, Portuguese
+dit                                   # ElevenLabs engine, F9 toggle, Portuguese
 dit --engine local                    # offline Whisper engine
 dit --engine local --mode hold        # hold key to record, release to transcribe
 dit --language en                     # English
@@ -153,9 +153,9 @@ dit --hotkey "RightCtrl+F9"           # key combo
 dit --hotkey F8                       # any F1..F12
 dit --device "Fifine"                 # prefer an input device by name substring
 dit --no-filler                       # strip "uh"/"um" from output
-dit --keyterm RedDB --keyterm Scribe  # bias toward names/jargon (cloud, repeatable)
-dit --vad-silence 0.8                 # commit faster on shorter pauses (cloud)
-dit --region eu                       # EU data residency (cloud)
+dit --keyterm RedDB --keyterm Scribe  # bias toward names/jargon (ElevenLabs, repeatable)
+dit --vad-silence 0.8                 # commit faster on shorter pauses (ElevenLabs)
+dit --region eu                       # EU data residency (ElevenLabs)
 dit --list-devices                    # list inputs and exit
 dit doctor                            # diagnose mic/keyboard/session permissions
 dit settings                          # open the settings GUI
@@ -190,16 +190,16 @@ dit --hotkey "RightAlt+F9"   # combo
 
 | Flag | Default | Description |
 |---|---|---|
-| `--engine` | `cloud` | `cloud` or `local` |
+| `--engine` | `elevenlabs` | `elevenlabs` (alias: `cloud`) or `local` |
 | `--mode` | `toggle` | `toggle` or `hold` |
 | `--language` | `pt` | Language code, or `auto` for auto-detection |
-| `--model` | `scribe_v2_realtime` | Scribe model (cloud) or Whisper model name (local) |
+| `--model` | `scribe_v2_realtime` | Scribe model (ElevenLabs) or Whisper model name (local) |
 | `--hotkey` | `F9` | Toggle/hold key — F1..F12, modifier keys, or combos |
 | `--device` | *system default* | Input device name substring |
 | `--no-filler` | off | Remove filler words (`no_verbatim`) |
-| `--keyterm <TERM>` | — | Bias toward a term; repeatable (cloud only) |
-| `--vad-silence <SECS>` | `1.5` | Silence before segment commits (cloud only) |
-| `--region` | `global` | API region: `global`, `us`, `eu`, `in` (cloud only) |
+| `--keyterm <TERM>` | — | Bias toward a term; repeatable (ElevenLabs only) |
+| `--vad-silence <SECS>` | `1.5` | Silence before segment commits (ElevenLabs only) |
+| `--region` | `global` | API region: `global`, `us`, `eu`, `in` (ElevenLabs only) |
 | `--no-preview` | off | Disable live terminal preview |
 | `--paste-shift` | off | Linux: paste with `Ctrl+Shift+V` (for terminals) |
 | `--type` | off | Linux: type via uinput instead of clipboard |
@@ -253,7 +253,7 @@ All settings persist to `~/.dit/config.toml` and are shared with the CLI. The tr
 Transcribe existing audio files with either engine:
 
 ```bash
-dit transcribe meeting.wav                       # cloud engine, stdout
+dit transcribe meeting.wav                       # ElevenLabs engine, stdout
 dit transcribe --engine local interview.mp3      # local Whisper, no API key needed
 dit transcribe lecture.flac --out lecture.txt    # write to file
 dit transcribe --engine local *.wav              # batch, multiple files
@@ -272,7 +272,7 @@ The system tray provides runtime controls without restarting:
 - **Switch language** — change on the fly
 - **Switch mode** — toggle ↔ hold, applied to the very next key press
 - **Switch transcript style** — verbatim ↔ remove fillers
-- **Switch engine** — cloud ↔ local (in builds with the local engine)
+- **Switch engine** — ElevenLabs ↔ local (in builds with the local engine)
 - **Settings…** — open the settings GUI
 - **Open last transcript** — opens the most recent session log
 - **Pause** — the hotkey can't *start* a recording; stopping always works

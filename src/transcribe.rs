@@ -86,7 +86,7 @@ async fn session_inner(
         Engine::Local => {
             anyhow::bail!("dit was built without --features local; rebuild with `cargo build --features local`")
         }
-        Engine::Cloud => {
+        Engine::ElevenLabs => {
             ScribeEngine
                 .run_stream(
                     &cfg,

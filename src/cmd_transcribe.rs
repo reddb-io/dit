@@ -187,7 +187,7 @@ pub fn decode_audio(path: &Path) -> Result<(Vec<f32>, u32)> {
 /// Route one decoded file through the selected engine.
 async fn transcribe_pcm(engine: Engine, cfg: &Config, pcm: Vec<i16>) -> Result<String> {
     match engine {
-        Engine::Cloud => ScribeEngine.transcribe_batch(cfg, pcm).await,
+        Engine::ElevenLabs => ScribeEngine.transcribe_batch(cfg, pcm).await,
         #[cfg(feature = "local")]
         Engine::Local => {
             let model = crate::models::resolve_local_model(&cfg.model)?;
@@ -212,9 +212,9 @@ fn build_config(args: &TranscribeArgs, engine: Engine) -> Result<Config> {
         config::load_env_file(path);
     }
 
-    // The local engine is fully offline — only the cloud path needs a key.
+    // The local engine is fully offline — only the ElevenLabs path needs a key.
     let api_key = std::env::var("ELEVENLABS_API_KEY").unwrap_or_default();
-    if api_key.is_empty() && engine == Engine::Cloud {
+    if api_key.is_empty() && engine == Engine::ElevenLabs {
         anyhow::bail!(
             "ELEVENLABS_API_KEY is not set. Put it in {} or export it in the environment.",
             env_path
@@ -229,7 +229,7 @@ fn build_config(args: &TranscribeArgs, engine: Engine) -> Result<Config> {
 
     let model = match (&args.model, engine) {
         (Some(m), _) => m.clone(),
-        (None, Engine::Cloud) => file.model.unwrap_or_else(|| DEFAULT_MODEL.into()),
+        (None, Engine::ElevenLabs) => file.model.unwrap_or_else(|| DEFAULT_MODEL.into()),
         (None, Engine::Local) => config::DEFAULT_LOCAL_MODEL.into(),
     };
 
