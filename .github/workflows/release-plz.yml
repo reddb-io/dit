@@ -2,15 +2,13 @@ name: release-plz
 
 # Commit-driven semver. release-plz reads the Conventional Commits on main and
 # opens a "release" PR that bumps Cargo.toml + CHANGELOG.md. Merging that PR
-# creates the version tag — and that tag triggers release.yml (binary builds +
-# GitHub Release). Versioning lives here; building/publishing lives in
+# creates the version tag. Versioning lives here; building/publishing lives in
 # release.yml — the same split reddb uses between changesets.yml and release.yml.
 #
-# No PAT required: tested on this repo, the tag release-plz creates does trigger
-# release.yml. (If a future change ever stops that — GitHub's documented rule is
-# that GITHUB_TOKEN-pushed tags don't start workflows — the fallback is to add a
-# `gh workflow run release.yml` dispatch step here, since workflow_dispatch is
-# allowed to fire from GITHUB_TOKEN.)
+# The tag alone does NOT start release.yml: GitHub's documented rule is that
+# GITHUB_TOKEN-pushed refs never trigger workflows (verified on this repo with
+# v0.3.0). So after release-plz tags, the step below dispatches release.yml
+# explicitly — workflow_dispatch IS allowed to fire from GITHUB_TOKEN.
 
 on:
   push:
@@ -19,6 +17,7 @@ on:
 permissions:
   contents: write       # create the version tag + commit the changelog
   pull-requests: write  # open/update the release PR
+  actions: write        # dispatch release.yml for the new tag
 
 concurrency:
   group: release-plz-${{ github.workflow }}
@@ -37,8 +36,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Run release-plz
+        id: release-plz
         uses: release-plz/action@v0.5
         with:
           config: release-plz.toml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # GITHUB_TOKEN-pushed tags never trigger workflows, so start the binary
+      # build ourselves for each release this run just tagged.
+      - name: Dispatch release build
+        if: steps.release-plz.outputs.releases_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo '${{ steps.release-plz.outputs.releases }}' | jq -r '.[].version' |
+            while read -r version; do
+              echo "dispatching release.yml for $version"
+              gh workflow run release.yml --repo "$GITHUB_REPOSITORY" -f version="$version"
+            done
