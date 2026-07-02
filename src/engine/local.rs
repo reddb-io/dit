@@ -39,9 +39,11 @@ const N_MELS: usize = 80;
 const WHISPER_MEL_FRAMES: usize = 3000;
 const WHISPER_WINDOW_SAMPLES: usize = WHISPER_MEL_FRAMES * HOP_LENGTH; // 480 000
 
-// Whisper multilingual special tokens.
+// Whisper multilingual special tokens. Note: multilingual `<|endoftext|>` is
+// 50257 (the English-only models use 50256) — matching the wrong one makes the
+// decoder run past the end of speech into repetition garbage.
 const SOT: u32 = 50258;
-const EOT: u32 = 50256;
+const EOT: u32 = 50257;
 const TRANSCRIBE: u32 = 50359;
 const NO_TIMESTAMPS: u32 = 50363;
 // Language tokens occupy 50259..=50357, in the order of `WHISPER_LANGUAGES`.
@@ -208,8 +210,16 @@ fn transcribe_blocking(model: &LocalModel, raw_pcm: Vec<u8>, language: &str) -> 
 
         let mel_flat = audio::pcm_to_mel(&config, &window, &mel_filters);
         let mel_frames = mel_flat.len() / N_MELS;
-        let mel =
-            Tensor::from_vec(mel_flat, (1, N_MELS, mel_frames), &device).context("mel tensor")?;
+        // candle's pcm_to_mel appends its own zero padding past the window;
+        // the encoder accepts exactly WHISPER_MEL_FRAMES, so trim to that.
+        // (contiguous: the encoder's conv1d must not see the narrowed view's
+        // original strides.)
+        let mel = Tensor::from_vec(mel_flat, (1, N_MELS, mel_frames), &device)
+            .context("mel tensor")?
+            .narrow(2, 0, WHISPER_MEL_FRAMES.min(mel_frames))
+            .context("mel trim")?
+            .contiguous()
+            .context("mel contiguous")?;
         let features = whisper.encoder.forward(&mel, true).context("encoder")?;
 
         let tok = match lang_tok {
@@ -238,6 +248,23 @@ fn transcribe_blocking(model: &LocalModel, raw_pcm: Vec<u8>, language: &str) -> 
     Ok(parts.join(" "))
 }
 
+/// Project the decoder's hidden state at one position to vocabulary logits.
+/// candle's `decoder.forward` returns *hidden states*; the tied-embedding
+/// projection (`final_linear`) is a separate call — skipping it means argmaxing
+/// over d_model dims and producing token ids < 384, i.e. garbage.
+fn logits_at(
+    whisper: &mut quantized_model::Whisper,
+    hidden: &Tensor,
+    position: usize,
+) -> Result<Tensor> {
+    let last = hidden.narrow(1, position, 1).context("hidden slice")?;
+    let logits = whisper
+        .decoder
+        .final_linear(&last)
+        .context("final linear")?;
+    logits.flatten_all().context("logits flatten")
+}
+
 /// One decoder forward pass with `[SOT]`, argmax over the language-token range.
 fn detect_language(
     whisper: &mut quantized_model::Whisper,
@@ -245,13 +272,13 @@ fn detect_language(
     device: &Device,
 ) -> Result<u32> {
     let sot_in = Tensor::from_slice(&[SOT], (1, 1), device).context("sot tensor")?;
-    let logits = whisper
+    let hidden = whisper
         .decoder
         .forward(&sot_in, features, true)
         .context("lang detect")?;
-    let last = logits.get(0)?.get(0)?;
+    let logits = logits_at(whisper, &hidden, 0)?;
     let lang_range = (LANG_TOK_END - LANG_TOK_START + 1) as usize;
-    let lang_logits = last
+    let lang_logits = logits
         .narrow(0, LANG_TOK_START as usize, lang_range)
         .context("lang slice")?;
     let detected = lang_logits
@@ -278,13 +305,12 @@ fn decode_window(
     for _ in 0..config.max_target_positions {
         let t_in = Tensor::from_slice(tokens.as_slice(), (1, tokens.len()), device)
             .context("decoder input")?;
-        let logits = whisper
+        let hidden = whisper
             .decoder
             .forward(&t_in, features, true)
             .context("decoder")?;
-        // logits: (1, seq_len, vocab_size) → pick last position.
-        let last = logits.get(0)?.get(tokens.len() - 1)?;
-        let next = last.argmax(0)?.to_scalar::<u32>().context("argmax")?;
+        let logits = logits_at(whisper, &hidden, tokens.len() - 1)?;
+        let next = logits.argmax(0)?.to_scalar::<u32>().context("argmax")?;
         if next == EOT {
             break;
         }

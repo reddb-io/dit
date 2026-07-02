@@ -277,9 +277,13 @@ mod tests {
 
     #[test]
     fn models_dir_ends_with_expected_path() {
+        // Compare path components, not strings — Windows uses `\`.
         let dir = models_dir();
-        let s = dir.to_string_lossy();
-        assert!(s.ends_with(".dit/models"), "got: {s}");
+        assert!(
+            dir.ends_with(std::path::Path::new(".dit/models")),
+            "got: {}",
+            dir.display()
+        );
     }
 
     #[cfg(feature = "local")]
