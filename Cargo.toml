@@ -9,6 +9,10 @@ repository = "https://github.com/reddb-io/dit"
 readme = "README.md"
 keywords = ["dictation", "speech-to-text", "elevenlabs", "voice", "accessibility"]
 categories = ["command-line-utilities", "multimedia::audio"]
+# Not on crates.io — an unrelated "dit" crate (0.0.1, 2022) squats the name
+# there. This also stops release-plz from versioning against that foreign
+# crate; with no registry, it derives the last release from our git tags.
+publish = false
 
 [[bin]]
 name = "dit"
