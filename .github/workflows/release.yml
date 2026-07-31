@@ -104,10 +104,15 @@ jobs:
           - { os: blacksmith-8vcpu-ubuntu-2404,     kind: musl, target: aarch64-unknown-linux-musl,      musl_image: aarch64-musl, musl_host: aarch64-linux-musl, asset_name: linux-aarch64-static, smoke: false, optional: true }
 
           # ---- macOS: native ARM, cross-built Intel from the same ARM pool ----
-          - { os: macos-14,       kind: native, target: aarch64-apple-darwin,  asset_name: macos-aarch64,  optional: true }
-          - { os: macos-14,       kind: native, target: x86_64-apple-darwin,   asset_name: macos-x86_64,   smoke: false, optional: true }
-          # ---- Windows x86_64 ------------------------------------------------
-          - { os: windows-latest, kind: native, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, optional: true }
+          - { os: macos-14,       kind: native, target: aarch64-apple-darwin,  asset_name: macos-aarch64 }
+          - { os: macos-14,       kind: native, target: x86_64-apple-darwin,   asset_name: macos-x86_64,   smoke: false }
+
+          # ---- Windows --------------------------------------------------------
+          - { os: windows-latest, kind: native, target: x86_64-pc-windows-msvc,  asset_name: windows-x86_64 }
+          # Windows on ARM, cross-compiled from the x64 runner using the ARM64
+          # MSVC tools that ship with the image. It cannot be executed here, so
+          # no smoke test; best-effort until an ARM Windows runner is in budget.
+          - { os: windows-latest, kind: native, target: aarch64-pc-windows-msvc, asset_name: windows-aarch64, smoke: false, optional: true }
     steps:
       - uses: actions/checkout@v6
 
@@ -219,14 +224,36 @@ jobs:
         if: matrix.kind == 'native'
         run: cargo build --locked --release --features local --target ${{ matrix.target }} --bin dit
 
+      # The sidecar must be in one canonical `<64-hex>  <asset>` shape on every
+      # runner: both installers and `dit update` read the first whitespace-
+      # separated token as the digest. Raw `certutil -hashfile` output is a
+      # three-line report whose first token is the literal "SHA256", which is
+      # why the Windows sidecar has to be parsed rather than redirected.
       - name: Package asset
         shell: bash
         run: |
+          set -euo pipefail
           EXT=""; [[ "${{ matrix.target }}" == *windows* ]] && EXT=".exe"
           ASSET="dit-${{ matrix.asset_name }}${EXT}"
           cp "target/${{ matrix.target }}/release/dit${EXT}" "${ASSET}"
-          shasum -a 256 "${ASSET}" > "${ASSET}.sha256" 2>/dev/null \
-            || certutil -hashfile "${ASSET}" SHA256 > "${ASSET}.sha256"
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            DIGEST="$(sha256sum "${ASSET}" | awk '{print $1}')"
+          elif command -v shasum >/dev/null 2>&1; then
+            DIGEST="$(shasum -a 256 "${ASSET}" | awk '{print $1}')"
+          else
+            # certutil prints: header line, the hex digest, a trailing status line.
+            DIGEST="$(certutil -hashfile "${ASSET}" SHA256 | tr -d '\r ' | sed -n '2p')"
+          fi
+          DIGEST="$(printf '%s' "${DIGEST}" | tr 'A-Z' 'a-z')"
+
+          # Fail the build rather than publish an unverifiable asset.
+          if [[ ! "${DIGEST}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::could not compute a SHA-256 digest for ${ASSET} (got '${DIGEST}')"
+            exit 1
+          fi
+          printf '%s  %s\n' "${DIGEST}" "${ASSET}" > "${ASSET}.sha256"
+          cat "${ASSET}.sha256"
 
       - name: Smoke test
         if: ${{ matrix.smoke != false }}
@@ -241,9 +268,84 @@ jobs:
           path: |
             dit-${{ matrix.asset_name }}*
 
+  # Every `optional: true` leg is allowed to fail without failing the workflow,
+  # which is exactly how a release can end up missing the asset an installer
+  # asks for by name. This job is the manifest gate: REQUIRED assets must be
+  # present and checksum-clean or the release never gets created, and OPTIONAL
+  # ones are reported loudly instead of vanishing.
+  verify-assets:
+    name: Verify release assets
+    needs: [plan, build]
+    if: needs.plan.outputs.should_skip != 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Check the asset manifest
+        run: |
+          set -uo pipefail
+          cd release
+
+          # Platforms the install one-liners and `dit update` resolve by name.
+          REQUIRED=(
+            dit-linux-x86_64
+            dit-linux-aarch64
+            dit-macos-x86_64
+            dit-macos-aarch64
+            dit-windows-x86_64.exe
+          )
+          # Best-effort coverage; the installers fall back when these are absent.
+          OPTIONAL=(
+            dit-linux-armv7
+            dit-linux-x86_64-static
+            dit-linux-aarch64-static
+            dit-windows-aarch64.exe
+          )
+
+          status=0
+
+          check() {
+            local asset="$1" level="$2"
+            if [[ ! -f "$asset" ]]; then
+              if [[ "$level" == required ]]; then
+                echo "::error::missing required asset ${asset}"; status=1
+              else
+                echo "::warning::missing optional asset ${asset} — its build leg failed"
+              fi
+              return
+            fi
+            if [[ ! -s "$asset" ]]; then
+              echo "::error::${asset} is empty"; status=1; return
+            fi
+            if [[ ! -f "${asset}.sha256" ]]; then
+              echo "::error::${asset} has no .sha256 sidecar"; status=1; return
+            fi
+            # Guard the exact shape the installers parse: first token = digest.
+            local expected actual
+            expected="$(awk '{print $1}' "${asset}.sha256" | head -1 | tr -d '[:space:]' | tr 'A-Z' 'a-z')"
+            if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::${asset}.sha256 is malformed — first token is '${expected}', not a 64-char digest"
+              status=1; return
+            fi
+            actual="$(sha256sum "$asset" | awk '{print $1}')"
+            if [[ "$expected" != "$actual" ]]; then
+              echo "::error::${asset} checksum mismatch (sidecar ${expected}, actual ${actual})"
+              status=1; return
+            fi
+            echo "ok  ${asset}  ($(stat -c%s "$asset") bytes)"
+          }
+
+          for a in "${REQUIRED[@]}"; do check "$a" required; done
+          for a in "${OPTIONAL[@]}"; do check "$a" optional; done
+
+          exit "$status"
+
   publish-github:
     name: GitHub Release
-    needs: [plan, build]
+    needs: [plan, build, verify-assets]
     if: needs.plan.outputs.should_skip != 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
@@ -324,7 +426,16 @@ jobs:
           xattr -d com.apple.quarantine dit   # clear Gatekeeper
           \`\`\`
 
-          **macOS (Intel):** \`dit-macos-x86_64\` · **Linux (armv7):** \`dit-linux-armv7\` · **Windows:** \`dit-windows-x86_64.exe\`
+          **Windows (x86_64):**
+          \`\`\`powershell
+          irm https://github.com/${REPO}/releases/download/${TAG}/dit-windows-x86_64.exe -OutFile dit.exe
+          \`\`\`
+
+          **macOS (Intel):** \`dit-macos-x86_64\` · **Linux (armv7):** \`dit-linux-armv7\` · **Windows (ARM64):** \`dit-windows-aarch64.exe\`
+
+          Windows on ARM is best-effort: when \`dit-windows-aarch64.exe\` is absent from a
+          release, the PowerShell installer falls back to the x86_64 build, which runs
+          under emulation.
 
           Each asset ships a \`.sha256\` sidecar — verify with \`shasum -a 256 -c dit-<asset>.sha256\`.
 

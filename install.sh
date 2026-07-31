@@ -155,6 +155,17 @@ version_lt() {
 # Sets ASSET and VARIANT. macOS and Windows ship a single asset per platform.
 choose_asset() {
   local base="${BINARY_NAME}-${PLATFORM}${EXT}"
+
+  # Windows on ARM: prefer the native build, fall back to x86_64 under emulation
+  # when a release did not publish one (its ARM64 leg is best-effort).
+  if [[ "$OS" == "windows" ]]; then
+    if [[ "$ARCH" == "aarch64" ]] && ! asset_exists "$base"; then
+      warn "no ARM64 build in ${RELEASE_TAG}; using the x86_64 build (runs under emulation)"
+      ASSET="${BINARY_NAME}-windows-x86_64${EXT}"; VARIANT="emulated"; return
+    fi
+    ASSET="$base"; VARIANT="native"; return
+  fi
+
   if [[ "$OS" != "linux" ]]; then ASSET="$base"; VARIANT="native"; return; fi
 
   local static="${BINARY_NAME}-${PLATFORM}-static"
@@ -196,7 +207,10 @@ resolve_tag() {
 verify_checksum() {
   local file="$1" asset="$2" sums expected actual
   sums="$(dl "https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${asset}.sha256" 2>/dev/null || true)"
-  expected="$(printf '%s' "$sums" | awk '{print $1}' | tr -d '[:space:]')"
+  # Sidecars are `<digest>  <asset>`, but releases up to v0.3.0 shipped the raw
+  # three-line `certutil -hashfile` report for the Windows asset, whose first
+  # token is the literal "SHA256". Take the first 64-char hex run, not $1.
+  expected="$(printf '%s' "$sums" | tr -d '\r' | grep -oiE '[0-9a-fA-F]{64}' | head -1 | tr 'A-Z' 'a-z')"
   [[ -n "$expected" ]] || { warn "no checksum published; skipping verification"; return 0; }
   if command -v sha256sum >/dev/null 2>&1; then actual="$(sha256sum "$file" | awk '{print $1}')"
   elif command -v shasum    >/dev/null 2>&1; then actual="$(shasum -a 256 "$file" | awk '{print $1}')"

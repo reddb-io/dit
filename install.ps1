@@ -18,13 +18,10 @@ $Repo = "reddb-io/dit"
 function Info($m) { Write-Host "› $m" -ForegroundColor Cyan }
 function Warn($m) { Write-Host "! $m" -ForegroundColor Yellow }
 
-# --- detect arch → asset name ----------------------------------------------
-$osArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
-if ($osArch -eq "Arm64") {
-    Warn "Windows on ARM detected; using the x86_64 build (runs under emulation)."
+function Test-AssetExists($u) {
+    try { Invoke-WebRequest $u -Method Head -UseBasicParsing | Out-Null; return $true }
+    catch { return $false }
 }
-# We currently ship a single Windows asset.
-$asset = "dit-windows-x86_64.exe"
 
 # --- resolve the release tag -----------------------------------------------
 if ([string]::IsNullOrEmpty($Version)) {
@@ -37,27 +34,53 @@ if ([string]::IsNullOrEmpty($Version)) {
 }
 if ([string]::IsNullOrEmpty($tag)) { throw "Could not determine a release tag for $Repo" }
 
+# --- detect arch → asset name ----------------------------------------------
+# ARM64 gets the native build when the release published one; older releases
+# (and any release whose best-effort ARM64 leg failed) fall back to x86_64,
+# which Windows runs under emulation.
+$base = "https://github.com/$Repo/releases/download/$tag"
+$osArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+if ($osArch -eq "Arm64") {
+    if (Test-AssetExists "$base/dit-windows-aarch64.exe") {
+        $asset = "dit-windows-aarch64.exe"
+    } else {
+        Warn "no ARM64 build in $tag; using the x86_64 build (runs under emulation)."
+        $asset = "dit-windows-x86_64.exe"
+    }
+} else {
+    $asset = "dit-windows-x86_64.exe"
+}
+$platform = ($asset -replace '^dit-', '') -replace '\.exe$', ''
+
 # --- download ---------------------------------------------------------------
-$url = "https://github.com/$Repo/releases/download/$tag/$asset"
+$url = "$base/$asset"
 $tmp = New-TemporaryFile
-Info "installing dit $tag (windows-x86_64)"
+Info "installing dit $tag ($platform)"
 Invoke-WebRequest $url -OutFile $tmp -UseBasicParsing
 
 # --- verify checksum (skips if sidecar missing) -----------------------------
-$sumLine = $null
+$sumText = $null
 try {
-    $sumLine = (Invoke-WebRequest "$url.sha256" -UseBasicParsing).Content
+    $sumText = (Invoke-WebRequest "$url.sha256" -UseBasicParsing).Content
 } catch {
     Warn "no checksum published; skipping verification"
 }
-if ($sumLine) {
-    $expected = ($sumLine -split '\s+')[0].Trim().ToLower()
-    $actual = (Get-FileHash $tmp -Algorithm SHA256).Hash.ToLower()
-    if ($expected -and ($expected -ne $actual)) {
-        Remove-Item $tmp -Force
-        throw "Checksum mismatch for $asset (expected $expected, got $actual)"
+if ($sumText) {
+    # Sidecars are `<digest>  <asset>`, but releases up to v0.3.0 shipped the raw
+    # three-line `certutil -hashfile` report on Windows, whose first token is the
+    # literal "SHA256". Pull the first 64-char hex run instead of the first token.
+    $m = [regex]::Match($sumText, '(?im)\b[0-9a-f]{64}\b')
+    if (-not $m.Success) {
+        Warn "checksum sidecar for $asset is unreadable; skipping verification"
+    } else {
+        $expected = $m.Value.ToLower()
+        $actual = (Get-FileHash $tmp -Algorithm SHA256).Hash.ToLower()
+        if ($expected -ne $actual) {
+            Remove-Item $tmp -Force
+            throw "Checksum mismatch for $asset (expected $expected, got $actual)"
+        }
+        Info "checksum OK"
     }
-    Info "checksum OK"
 }
 
 # --- install ----------------------------------------------------------------

@@ -74,16 +74,23 @@ dit update --version v0.3.0   # pin a specific release
 
 Grab the binary for your platform from the [**Releases**](https://github.com/reddb-io/dit/releases) page:
 
-| Platform | Asset |
-|---|---|
-| Linux x86_64 | `dit-linux-x86_64` |
-| Linux aarch64 | `dit-linux-aarch64` |
-| Linux armv7 (32-bit ARM) | `dit-linux-armv7` |
-| Linux x86_64 — fully static | `dit-linux-x86_64-static` |
-| Linux aarch64 — fully static | `dit-linux-aarch64-static` |
-| macOS Apple Silicon | `dit-macos-aarch64` |
-| macOS Intel | `dit-macos-x86_64` |
-| Windows x86_64 | `dit-windows-x86_64.exe` |
+| Platform | Asset | |
+|---|---|---|
+| Linux x86_64 | `dit-linux-x86_64` | always published |
+| Linux aarch64 | `dit-linux-aarch64` | always published |
+| macOS Apple Silicon | `dit-macos-aarch64` | always published |
+| macOS Intel | `dit-macos-x86_64` | always published |
+| Windows x86_64 | `dit-windows-x86_64.exe` | always published |
+| Linux armv7 (32-bit ARM) | `dit-linux-armv7` | best-effort |
+| Linux x86_64 — fully static | `dit-linux-x86_64-static` | best-effort |
+| Linux aarch64 — fully static | `dit-linux-aarch64-static` | best-effort |
+| Windows ARM64 | `dit-windows-aarch64.exe` | best-effort |
+
+The five *always published* assets are gated in CI: a release is not created unless
+all five exist and match their checksums. The *best-effort* ones are cross-compiled
+and may be absent from a given release — `install.sh`, `install.ps1` and `dit update`
+all fall back automatically (Windows ARM64 → the x86_64 build under emulation;
+Linux → the glibc/static counterpart).
 
 Every asset ships a `.sha256` sidecar — verify with `shasum -a 256 -c dit-<asset>.sha256`.
 
