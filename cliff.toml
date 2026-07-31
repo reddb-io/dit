@@ -20,8 +20,13 @@ body = """
 - {% if commit.scope %}**{{ commit.scope }}**: {% endif %}{{ commit.message | split(pat="\n") | first | trim }}
 {% endfor %}
 {% endfor -%}
-{% if previous and previous.version %}
-**Full Changelog**: https://github.com/reddb-io/dit/compare/{{ previous.version }}...{{ version }}
+{% if previous and previous.version and previous.version != version %}
+{# Our tags carry a `v` prefix, but the two callers disagree on whether the
+   rendered version does: release-plz passes a bare `0.3.2` while release.yml
+   passes the tag `v0.3.2` (hence the trim on the heading above). Emitting
+   either verbatim produces a 404 in one of the two — `compare/0.3.1...0.3.2`
+   was the broken half. Normalise, then re-add the `v` the tags actually use. #}
+**Full Changelog**: https://github.com/reddb-io/dit/compare/v{{ previous.version | trim_start_matches(pat="v") }}...v{{ version | trim_start_matches(pat="v") }}
 {% endif %}
 """
 

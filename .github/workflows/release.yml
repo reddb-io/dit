@@ -361,15 +361,48 @@ jobs:
           path: release
           merge-multiple: true
 
+      # `--unreleased` means "commits belonging to no tag". On the tag-push route
+      # the tag already points at HEAD by the time this runs, so nothing is
+      # unreleased and the notes come out empty — which is exactly what shipped
+      # in v0.3.1. Resolve an explicit <prev>..<tag> range instead, and only fall
+      # back to --unreleased when the tag genuinely does not exist yet (the
+      # workflow_dispatch route, where release-plz tags before dispatching).
+      - name: Resolve the changelog range
+        id: range
+        env:
+          TAG: ${{ needs.plan.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            PREV="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+            if [[ -n "$PREV" ]]; then
+              ARGS="${PREV}..${TAG}"
+            else
+              ARGS="--tag ${TAG}"   # first ever release: no predecessor
+            fi
+          else
+            ARGS="--unreleased --tag ${TAG}"
+          fi
+          echo "resolved git-cliff range args: ${ARGS}"
+          echo "args=${ARGS}" >> "$GITHUB_OUTPUT"
+
       - name: Generate changelog from commits
         uses: orhun/git-cliff-action@v4
         id: changelog
         with:
           config: cliff.toml
-          args: --unreleased --tag ${{ needs.plan.outputs.release_tag }} --strip header
+          args: ${{ steps.range.outputs.args }} --strip header
         env:
           OUTPUT: release-changelog.md
           GITHUB_REPO: ${{ github.repository }}
+
+      # An empty changelog is not a fatal condition, but it is always a bug —
+      # v0.3.1 shipped one and nothing said so.
+      - name: Warn on an empty changelog
+        run: |
+          if [[ ! -s release-changelog.md ]] || ! grep -qE '^\s*-' release-changelog.md; then
+            echo "::warning::the generated changelog has no entries — check the range resolved above"
+          fi
 
       - name: Compose release body
         env:
