@@ -7,8 +7,27 @@
 # binaries and publishes the GitHub Release.
 
 [workspace]
-# We don't publish to crates.io.
-publish = false
+# Derive "the last release" from OUR git tags, never from crates.io.
+#
+# This is load-bearing twice over:
+#
+#  1. An unrelated `dit` crate (0.0.1, 2022) squats the name on crates.io. With
+#     registry lookups on, release-plz reads that as "registry 0.0.1 < local
+#     0.3.x" and parks a phantom release PR open forever (the bug PR #39 chased).
+#  2. `publish = false` alone does NOT stop those lookups — the release-plz docs
+#     are explicit: "release-plz will still use the cargo registry to check
+#     what's the latest release". Only `git_only` does, and it skips
+#     `cargo publish` on its own.
+#
+# The obvious-looking alternative — `publish = false` in **Cargo.toml** — is a
+# trap. It silences release-plz entirely: per its FAQ it "publishes all
+# packages, except: packages with `publish = false` in the Cargo.toml", so
+# `release-pr` returned {"prs":[]} and `release` said "nothing to release" on
+# every green run between v0.3.0 and v0.3.1, and no release PR was ever opened.
+# `git_only = true` is what makes a private package eligible again
+# (release-plz PR #2603, "consider private git_only packages", in 0.3.160+),
+# which is why Cargo.toml keeps its `publish = false` guard alongside this.
+git_only = true
 # release.yml owns the GitHub Release (it attaches the built binaries), so
 # release-plz must NOT create one…
 git_release_enable = false
