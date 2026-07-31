@@ -66,9 +66,23 @@ pub fn run(args: &UpdateArgs) -> Result<()> {
 
     let base = format!("https://github.com/{REPO}/releases/download/{target_tag}");
 
-    let bytes = http_get_bytes(&format!("{base}/{asset}")).with_context(|| {
-        format!("could not download {asset} for {target_tag} — this platform may not have a prebuilt binary")
-    })?;
+    // A release may not carry every asset — the ARM64 Windows leg is best-effort
+    // — so fall back to the emulated x86_64 build rather than dead-ending.
+    let (asset, bytes) = match http_get_bytes(&format!("{base}/{asset}")) {
+        Ok(bytes) => (asset, bytes),
+        Err(e) => match fallback_asset(&asset) {
+            Some(alt) => {
+                eprintln!("! {asset} is not in {target_tag}; falling back to {alt}");
+                let bytes = http_get_bytes(&format!("{base}/{alt}")).with_context(|| {
+                    format!("could not download {alt} for {target_tag} — this platform may not have a prebuilt binary")
+                })?;
+                (alt, bytes)
+            }
+            None => return Err(e).with_context(|| {
+                format!("could not download {asset} for {target_tag} — this platform may not have a prebuilt binary")
+            }),
+        },
+    };
     verify_checksum(&bytes, &format!("{base}/{asset}.sha256"))?;
 
     let exe = std::env::current_exe().context("cannot locate the running dit executable")?;
@@ -109,6 +123,14 @@ fn asset_name() -> Result<String> {
     };
 
     Ok(format!("dit-{os}-{arch}{variant}{ext}"))
+}
+
+/// A second-choice asset when a release does not publish the exact match for
+/// this host. Windows on ARM runs the x86_64 build under emulation; every other
+/// host has no substitute (a Linux `-static` fallback would be a downgrade to a
+/// different libc, which the installer — not the running binary — decides).
+fn fallback_asset(asset: &str) -> Option<String> {
+    (asset == "dit-windows-aarch64.exe").then(|| "dit-windows-x86_64.exe".to_string())
 }
 
 /// Write the new bytes next to the current executable and atomically replace it.
@@ -157,6 +179,18 @@ fn latest_tag() -> Result<String> {
         .context("no published release found")
 }
 
+/// The first 64-char hex run in a `.sha256` sidecar, lowercased.
+///
+/// Sidecars are `<digest>  <asset>`, but releases up to v0.3.0 shipped the raw
+/// three-line `certutil -hashfile` report for the Windows asset, whose first
+/// whitespace-separated token is the literal `SHA256`. Scanning for the digest
+/// shape reads both, so a Windows host can still self-update off an old release.
+fn first_digest(sums: &str) -> Option<String> {
+    sums.split(|c: char| !c.is_ascii_hexdigit())
+        .find(|tok| tok.len() == 64)
+        .map(str::to_ascii_lowercase)
+}
+
 /// Download the `.sha256` sidecar and compare it to the asset's digest. A
 /// missing sidecar is a warning, not a hard failure (mirrors the install script).
 fn verify_checksum(bytes: &[u8], sha_url: &str) -> Result<()> {
@@ -167,15 +201,10 @@ fn verify_checksum(bytes: &[u8], sha_url: &str) -> Result<()> {
             return Ok(());
         }
     };
-    let expected = sums
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if expected.is_empty() {
+    let Some(expected) = first_digest(&sums) else {
         eprintln!("! no checksum published; skipping verification");
         return Ok(());
-    }
+    };
 
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -251,4 +280,44 @@ fn hex(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DIGEST: &str = "80cd9c581d6e026026a454897150021e10c402211fffba8aa7d715f6fac155a4";
+
+    #[test]
+    fn reads_the_canonical_sidecar() {
+        let sums = format!("{DIGEST}  dit-windows-x86_64.exe\n");
+        assert_eq!(first_digest(&sums).as_deref(), Some(DIGEST));
+    }
+
+    /// Releases up to v0.3.0 published the raw `certutil -hashfile` report as
+    /// the Windows sidecar; its first token is "SHA256", not the digest.
+    #[test]
+    fn reads_a_legacy_certutil_sidecar() {
+        let sums = format!(
+            "SHA256 hash of dit-windows-x86_64.exe:\r\n{}\r\nCertUtil: -hashfile command completed successfully.\r\n",
+            DIGEST.to_uppercase()
+        );
+        assert_eq!(first_digest(&sums).as_deref(), Some(DIGEST));
+    }
+
+    #[test]
+    fn rejects_a_sidecar_with_no_digest() {
+        assert_eq!(first_digest("Not Found"), None);
+        assert_eq!(first_digest(""), None);
+    }
+
+    #[test]
+    fn only_windows_arm64_has_a_fallback() {
+        assert_eq!(
+            fallback_asset("dit-windows-aarch64.exe").as_deref(),
+            Some("dit-windows-x86_64.exe")
+        );
+        assert_eq!(fallback_asset("dit-linux-aarch64"), None);
+        assert_eq!(fallback_asset("dit-macos-aarch64"), None);
+    }
 }
