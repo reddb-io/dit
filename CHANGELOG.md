@@ -1,4 +1,17 @@
 
+## What's in 0.3.1
+
+
+### Bug Fixes
+
+- **release**: repair the Windows install path and widen arch coverage
+
+
+### CI
+
+- run macOS/Windows legs post-merge only, PR caches restore-only
+
+
 ## What's in 0.3.0
 
 
