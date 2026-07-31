@@ -35,6 +35,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.95.0
 
+      # `git_only` makes release-plz run `cargo package` to compare the working
+      # tree against the tagged release, and `cargo package` *verifies by
+      # building*. That drags in alsa-sys, whose build script panics without
+      # libasound. This job never needed a compiler before git_only, which is
+      # why it alone lacks the dep that ci.yml and release.yml both install.
+      - name: Install ALSA dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+
       - name: Run release-plz
         id: release-plz
         uses: release-plz/action@v0.5
