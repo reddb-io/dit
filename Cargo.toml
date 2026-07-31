@@ -10,8 +10,13 @@ readme = "README.md"
 keywords = ["dictation", "speech-to-text", "elevenlabs", "voice", "accessibility"]
 categories = ["command-line-utilities", "multimedia::audio"]
 # Not on crates.io — an unrelated "dit" crate (0.0.1, 2022) squats the name
-# there. This also stops release-plz from versioning against that foreign
-# crate; with no registry, it derives the last release from our git tags.
+# there, so this is purely a guard against an accidental `cargo publish`.
+#
+# It is NOT what keeps release-plz off that foreign crate — believing so cost us
+# every release PR between v0.3.0 and v0.3.1. release-plz skips private packages
+# outright, so this line alone makes it go silently, greenly idle. `git_only`
+# in release-plz.toml is what pins versioning to our git tags *and* re-admits a
+# private package; read the comment there before touching either line.
 publish = false
 
 [[bin]]

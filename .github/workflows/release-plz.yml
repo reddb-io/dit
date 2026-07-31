@@ -43,6 +43,25 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # An idle release-plz is indistinguishable from a healthy one: it exits 0
+      # and prints {"prs":[]}. That is how this repo went from v0.3.0 to v0.3.1
+      # with no release PR ever opened, across a month of green runs. If there
+      # are feat/fix/breaking commits since the last tag and release-plz
+      # proposed nothing, say so out loud.
+      - name: Flag a silent no-op
+        if: steps.release-plz.outputs.prs_created != 'true' && steps.release-plz.outputs.releases_created != 'true'
+        run: |
+          set -uo pipefail
+          LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          [[ -n "$LAST_TAG" ]] || exit 0
+          BUMPING="$(git log --format=%s "${LAST_TAG}..HEAD" |
+            grep -cE '^(feat|fix)(\([^)]*\))?!?:|^[a-z]+(\([^)]*\))?!:' || true)"
+          if [[ "${BUMPING:-0}" -gt 0 ]]; then
+            echo "::warning::release-plz proposed no release PR, but ${BUMPING} version-bumping commit(s) landed since ${LAST_TAG}. It may be skipping this package — check release-plz.toml (git_only) and Cargo.toml (publish)."
+          else
+            echo "release-plz proposed nothing; no version-bumping commits since ${LAST_TAG}. Expected."
+          fi
+
       # GITHUB_TOKEN-pushed tags never trigger workflows, so start the binary
       # build ourselves for each release this run just tagged.
       - name: Dispatch release build
