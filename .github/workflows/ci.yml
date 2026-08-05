@@ -21,12 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Cost policy (July 2026, Blacksmith bill): macOS ($0.08/min) and
-        # Windows legs run post-merge on push to main only. Open PRs build
-        # and test on Linux; cross-platform breakage surfaces after merge.
-        os: ${{ github.event_name == 'pull_request'
-          && fromJSON('["blacksmith-4vcpu-ubuntu-2404"]')
-          || fromJSON('["blacksmith-4vcpu-ubuntu-2404", "blacksmith-6vcpu-macos-15", "blacksmith-8vcpu-windows-2025"]') }}
+        # Trunk is Linux-only. The tag/manual release workflow remains the
+        # authoritative multi-OS and multi-arch build gate.
+        os: [ubuntu-24.04]
     steps:
       - uses: actions/checkout@v6
 
