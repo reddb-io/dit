@@ -24,7 +24,7 @@ concurrency:
 jobs:
   plan:
     name: Plan release
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     outputs:
       should_skip: ${{ steps.plan.outputs.should_skip }}
       release_tag: ${{ steps.plan.outputs.release_tag }}
@@ -277,7 +277,7 @@ jobs:
     name: Verify release assets
     needs: [plan, build]
     if: needs.plan.outputs.should_skip != 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -347,7 +347,7 @@ jobs:
     name: GitHub Release
     needs: [plan, build, verify-assets]
     if: needs.plan.outputs.should_skip != 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
