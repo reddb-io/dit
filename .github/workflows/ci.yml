@@ -23,7 +23,7 @@ jobs:
       matrix:
         # Trunk is Linux-only. The tag/manual release workflow remains the
         # authoritative multi-OS and multi-arch build gate.
-        os: [blacksmith-4vcpu-ubuntu-2404]
+        os: [ubuntu-24.04]
     steps:
       - uses: actions/checkout@v6
 
