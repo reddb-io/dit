@@ -1,4 +1,22 @@
 
+## What's in 0.4.0
+
+
+### Build & CI
+
+- **release**: bump the minor version for features while on 0.x ([#54](https://github.com/reddb-io/dit/pull/54))
+- keep trunk builds Linux-only ([#51](https://github.com/reddb-io/dit/pull/51))
+
+
+### Features
+
+- **delivery**: route dictation into zellij as a bracketed paste ([#53](https://github.com/reddb-io/dit/pull/53))
+
+
+
+**Full Changelog**: https://github.com/reddb-io/dit/compare/v0.3.2...v0.4.0
+
+
 ## What's in 0.3.2
 
 
