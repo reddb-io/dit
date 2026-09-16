@@ -28,6 +28,10 @@
 # (release-plz PR #2603, "consider private git_only packages", in 0.3.160+),
 # which is why Cargo.toml keeps its `publish = false` guard alongside this.
 git_only = true
+# While the crate is 0.x, release-plz follows Cargo's semver reading by default
+# and turns a `feat` into a *patch* bump (0.3.2 → 0.3.3). The header above
+# promises feat → minor, so say so explicitly.
+features_always_increment_minor = true
 # release.yml owns the GitHub Release (it attaches the built binaries), so
 # release-plz must NOT create one…
 git_release_enable = false
