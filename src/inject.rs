@@ -21,9 +21,11 @@ pub struct Injector {
 }
 
 impl Injector {
-    /// Spawn the injector thread. On Linux this honours `cfg.paste_shift`
-    /// (Ctrl+Shift+V instead of Ctrl+V, for terminals), `cfg.type_hybrid`
-    /// (type via uinput with a clipboard fallback instead of pasting) and
+    /// Spawn the injector thread. On Linux this honours `cfg.delivery`
+    /// (terminal-aware zellij routing, or a fixed paste/type path),
+    /// `cfg.paste_shift` (Ctrl+Shift+V instead of Ctrl+V, for terminals),
+    /// `cfg.type_hybrid` (type via uinput with a clipboard fallback instead of
+    /// pasting) and
     /// `cfg.layout` (which char → keycode map the typing path uses; `auto`
     /// detects the active layout once, here). macOS/Windows always type via
     /// enigo, which follows the OS input method, so none of this applies.
@@ -33,10 +35,11 @@ impl Injector {
         #[cfg(target_os = "linux")]
         {
             let paste_shift = cfg.paste_shift;
-            let type_hybrid = cfg.type_hybrid;
+            let delivery = cfg.delivery;
+            let type_hybrid = delivery.types(cfg.type_hybrid);
             let layout = crate::layout::resolve(cfg.layout);
             std::thread::spawn(move || {
-                crate::linux_input::run_injector(rx, paste_shift, type_hybrid, layout)
+                crate::linux_input::run_injector(rx, delivery, paste_shift, type_hybrid, layout)
             });
         }
 

@@ -22,9 +22,10 @@ use evdev::{uinput::VirtualDevice, AttributeSet, EventType, KeyCode, KeyEvent};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{Hotkey, Key, Modifier};
+use crate::config::{DeliverySetting, Hotkey, Key, Modifier};
 use crate::inject::InjectMsg;
 use crate::layout::{char_to_key, typing_keycodes, KeyboardLayout};
+use crate::terminal_route::{Routed, TerminalRouter};
 use crate::Control;
 
 const HOTKEY_DEBOUNCE: Duration = Duration::from_millis(350);
@@ -295,6 +296,11 @@ fn run_keyboard_reader(
 
 /// Drive the injector backend on a dedicated thread (called from `inject.rs`).
 ///
+/// With `delivery = auto`, each transcript first goes through
+/// [`crate::terminal_route`]: when the focused window is a terminal showing a
+/// zellij session, it is written there as a bracketed paste and the
+/// clipboard/uinput path is skipped.
+///
 /// `shift` selects Ctrl+Shift+V over Ctrl+V for the clipboard paste chord.
 /// `type_hybrid` opts into the typing-first delivery path: characters `layout`
 /// can produce are injected as keystrokes via `/dev/uinput`, and only the
@@ -302,6 +308,7 @@ fn run_keyboard_reader(
 /// clipboard — so most deliveries never touch the clipboard at all.
 pub fn run_injector(
     rx: Receiver<InjectMsg>,
+    delivery: DeliverySetting,
     shift: bool,
     type_hybrid: bool,
     layout: KeyboardLayout,
@@ -313,8 +320,23 @@ pub fn run_injector(
             return;
         }
     };
+    let router = (delivery == DeliverySetting::Auto).then(TerminalRouter::new);
     while let Ok(InjectMsg::Type(text)) = rx.recv() {
         let chars = text.chars().count();
+        if let Some(router) = &router {
+            match router.try_deliver(&text) {
+                Routed::Delivered => {
+                    debug!("delivered: {text}");
+                    info!("delivery emitted: zellij bracketed paste ({chars} chars)");
+                    continue;
+                }
+                Routed::Failed => {
+                    error!("delivery failed: zellij bracketed paste incomplete ({chars} chars)");
+                    continue;
+                }
+                Routed::Fallback => {}
+            }
+        }
         let mode = if type_hybrid {
             "typing (uinput, clipboard fallback)"
         } else if shift {

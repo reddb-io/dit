@@ -1,0 +1,8 @@
+{
+  "uuid": "dit-focus@reddb.io",
+  "name": "dit focus bridge",
+  "description": "Tells the dit dictation service which app is focused, so dictation into a terminal running zellij can be delivered as a bracketed paste straight to the focused pane. Exposes io.reddb.dit.Focus on the session bus; nothing is shown on screen.",
+  "url": "https://github.com/reddb-io/dit",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "version": 1
+}

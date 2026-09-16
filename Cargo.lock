@@ -1455,6 +1455,8 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "ureq",
+ "x11rb",
+ "zbus",
 ]
 
 [[package]]

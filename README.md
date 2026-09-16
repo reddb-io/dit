@@ -143,7 +143,7 @@ hotkey = "F9"
 no_filler = false
 ```
 
-`dit settings` reads and writes this file. CLI flags always override it.
+`dit settings` reads and writes this file. CLI flags always override it. Every key can also come from a `DIT_*` environment variable (e.g. `DIT_DELIVERY=paste`); the order is *defaults < config.toml < environment < CLI flags*.
 
 ---
 
@@ -210,6 +210,7 @@ dit --hotkey "RightAlt+F9"   # combo
 | `--no-preview` | off | Disable live terminal preview |
 | `--paste-shift` | off | Linux: paste with `Ctrl+Shift+V` (for terminals) |
 | `--type` | off | Linux: type via uinput instead of clipboard |
+| `--delivery` | `auto` | Linux: `auto` (zellij-aware, see [Terminals and zellij](#terminals-and-zellij)), `paste`, or `type` |
 | `--layout` | `auto` | Linux `--type` keyboard layout: `auto`, `us`, `abnt2` |
 | `--env-file` | `~/.dit.env` | Path to the API key file |
 | `--list-devices` | — | Print input devices and exit |
@@ -328,6 +329,40 @@ dit service uninstall
 > In terminals, use `--paste-shift` (`Ctrl+Shift+V`) or `--type` (uinput typing, bypasses clipboard entirely — avoids GNOME/Wayland intermittently interpreting the clipboard as an image after a screenshot copy).
 >
 > `--type` is layout-aware: dit detects the active keyboard layout (XKB env → GNOME settings → setxkbmap → localectl → locale) and maps characters accordingly. `us` and `abnt2` (Brazilian) are supported — on ABNT2, `ç` is typed directly and dead-key accents ride the clipboard fallback. Pin it with `--layout us|abnt2` (or `layout = "abnt2"` in config.toml) if detection guesses wrong; `dit doctor` shows what was detected.
+
+### Terminals and zellij
+
+By default (`delivery = "auto"`) dit checks which window is focused before each delivery. When it is a known terminal — Alacritty, kitty, WezTerm, foot, Ghostty, GNOME Terminal, Ptyxis, GNOME Console or Konsole — and a [zellij](https://zellij.dev) client runs inside it, dit writes the transcript straight into that session's focused pane as a **bracketed paste**:
+
+```text
+zellij --session <name> action write ESC[200~   # only if the app enabled bracketed paste
+zellij --session <name> action write <text>
+zellij --session <name> action write ESC[201~
+```
+
+Shells, editors and agent TUIs (bash, vim, nano, Claude Code, Codex, redcode) then see pasted text, so a newline never submits, and nothing depends on the terminal's paste shortcut or the clipboard. Escape and other control characters (everything but tabs and newlines) are stripped from the transcript first, so dictated text can never end the paste early. Everything else — other apps, a terminal without zellij, or any doubt about which session is focused — keeps the normal clipboard paste chord (`--paste-shift`) or `--type`.
+
+How the session is found: dit walks the focused window's process tree for a `zellij` client and reads the session from its command line (`zellij attach NAME`, `zellij --session NAME`) or its `ZELLIJ_SESSION_NAME`; it talks to the server with that client's own binary and `ZELLIJ_SOCKET_DIR`. A client that doesn't name its session is matched by the window title, or by being the only live session. When the focused window's pid is unknown, the only live session (or the one the title names) is used.
+
+Focused-window detection:
+
+| Session | Provider |
+|---|---|
+| **GNOME (Wayland or X11)** | the bundled Shell extension `dit-focus@reddb.io` (below) |
+| **Other X11 desktops** | `_NET_ACTIVE_WINDOW` / `WM_CLASS` / `_NET_WM_PID`, built in |
+| **Other Wayland compositors** | not detected yet — delivery stays on the paste chord |
+
+GNOME gives ordinary apps no way to ask which window is focused on Wayland, so dit ships a tiny extension that answers `io.reddb.dit.Focus.Get() → (app_id, wm_class, pid, title)` on the session bus when dit asks. It shows no UI and does no work between calls. The installer offers it on GNOME, or:
+
+```bash
+dit gnome-extension install     # writes ~/.local/share/gnome-shell/extensions/dit-focus@reddb.io and enables it
+# log out and back in: GNOME Shell on Wayland only loads new extensions at login
+dit gnome-extension status      # installed / enabled / answering
+dit doctor                      # run inside zellij: shows the route dit would take
+dit gnome-extension uninstall   # disable and remove it
+```
+
+Pin the old behaviour with `--delivery paste` (always the paste chord) or `--delivery type` (always typing), or `delivery = "paste"` in `config.toml`. `--type` together with the default `auto` keeps typing as the fallback outside zellij.
 
 > [!NOTE]
 > **macOS** — grant **Accessibility** permission (System Settings → Privacy & Security → Accessibility).

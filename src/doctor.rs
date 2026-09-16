@@ -11,6 +11,7 @@ pub fn run(prefer_device: Option<String>) -> Result<()> {
     check_local_engine();
     check_session_env();
     check_linux_input();
+    check_delivery_route();
     check_audio(prefer_device)?;
     Ok(())
 }
@@ -125,6 +126,53 @@ fn check_linux_input() {
 
 #[cfg(not(target_os = "linux"))]
 fn check_linux_input() {}
+
+/// Show what terminal-aware delivery would do right now. `dit doctor` usually
+/// runs in the terminal that is focused, so this exercises the real route.
+#[cfg(target_os = "linux")]
+fn check_delivery_route() {
+    use crate::terminal_route::{Plan, TerminalRouter};
+
+    let (focused, plan) = TerminalRouter::new().route();
+    match &focused {
+        Some(app) => status(
+            true,
+            "focus detection",
+            &format!(
+                "{}: app_id {:?}, wm_class {:?}, pid {}",
+                app.source,
+                app.app_id,
+                app.wm_class,
+                app.pid.map_or("unknown".into(), |p| p.to_string())
+            ),
+        ),
+        None => status(
+            false,
+            "focus detection",
+            "unavailable — on GNOME run `dit gnome-extension install` and log in again; \
+             delivery keeps using the paste chord",
+        ),
+    }
+    match plan {
+        Plan::Zellij { terminal, target } => status(
+            true,
+            "terminal-aware delivery",
+            &format!(
+                "{terminal} → zellij session {:?} (via {})",
+                target.session,
+                target.launcher.binary.display()
+            ),
+        ),
+        Plan::Fallback(reason) => status(
+            true,
+            "terminal-aware delivery",
+            &format!("paste/type fallback: {reason}"),
+        ),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn check_delivery_route() {}
 
 fn check_audio(prefer_device: Option<String>) -> Result<()> {
     let host = cpal::default_host();
