@@ -21,6 +21,10 @@ mod cmd_transcribe;
 mod config;
 mod doctor;
 mod engine;
+#[cfg(target_os = "linux")]
+mod focus;
+#[cfg(target_os = "linux")]
+mod gnome_extension;
 mod inject;
 #[cfg(target_os = "linux")]
 mod layout;
@@ -31,8 +35,12 @@ mod notify;
 mod output;
 mod service;
 mod settings;
+#[cfg(target_os = "linux")]
+mod terminal_route;
 mod transcribe;
 mod update;
+#[cfg(target_os = "linux")]
+mod zellij;
 
 use std::sync::Arc;
 
@@ -132,6 +140,15 @@ fn main() -> Result<()> {
     }
     if let Some(Command::Doctor) = &cli.command {
         return doctor::run(cli.device.clone());
+    }
+    if let Some(Command::GnomeExtension { action }) = &cli.command {
+        #[cfg(target_os = "linux")]
+        return gnome_extension::run(action);
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = action;
+            anyhow::bail!("the GNOME Shell extension is only available on Linux");
+        }
     }
     if let Some(Command::Update {
         check,

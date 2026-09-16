@@ -13,6 +13,7 @@
 #   --api-key <key>        write this ElevenLabs key to ~/.dit.env
 #   --with-service         install the autostart user service
 #   --no-service           never install the service
+#   --no-gnome-extension   skip the GNOME Shell focus bridge (terminal-aware delivery)
 #   --skip-deps            don't touch system runtime libraries
 #   --force                reinstall even if the requested version is already present
 #   --static               force the fully-static (musl) build, even on a glibc host
@@ -35,6 +36,7 @@ VERSION=""
 API_KEY=""
 ASSUME_YES=false
 WANT_SERVICE="ask"   # ask | yes | no
+WANT_GNOME_EXTENSION=true
 SKIP_DEPS=false
 FORCE=false
 FORCE_STATIC=false
@@ -51,12 +53,13 @@ while [[ $# -gt 0 ]]; do
     --api-key)      API_KEY="$2"; shift 2 ;;
     --with-service) WANT_SERVICE="yes"; shift ;;
     --no-service)   WANT_SERVICE="no"; shift ;;
+    --no-gnome-extension) WANT_GNOME_EXTENSION=false; shift ;;
     --skip-deps)    SKIP_DEPS=true; shift ;;
     --force)        FORCE=true; shift ;;
     --static)       FORCE_STATIC=true; shift ;;
     --check-only)   CHECK_ONLY=true; shift ;;
     -y|--yes)       ASSUME_YES=true; shift ;;
-    -h|--help)      sed -n '2,27p' "$0" 2>/dev/null || true; exit 0 ;;
+    -h|--help)      sed -n '2,28p' "$0" 2>/dev/null || true; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -362,6 +365,31 @@ linux_input_setup() {
   fi
 }
 
+# --- GNOME Shell focus bridge ------------------------------------------------
+# Terminal-aware delivery needs to know which window is focused. GNOME on
+# Wayland only tells extensions, so dit ships a tiny one (dit-focus@reddb.io)
+# inside the binary; `dit gnome-extension install` writes and enables it.
+gnome_focus_extension() {
+  local dest="$1"
+  [[ "$OS" == "linux" && "$WANT_GNOME_EXTENSION" == true ]] || return 0
+  [[ "${XDG_CURRENT_DESKTOP:-}" == *GNOME* ]] || return 0
+  command -v gnome-shell >/dev/null 2>&1 || return 0
+  # Releases before terminal-aware delivery have no such subcommand.
+  "$dest" gnome-extension --help >/dev/null 2>&1 || return 0
+
+  if [[ -f "${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/dit-focus@reddb.io/metadata.json" ]]; then
+    ok "GNOME focus bridge already installed (dit gnome-extension status)"
+    return 0
+  fi
+  say "dit can route dictation into terminals running zellij as a real paste; on GNOME that needs a small Shell extension (dit-focus@reddb.io) that reports the focused window."
+  if confirm "Install and enable the GNOME focus bridge?" yes; then
+    "$dest" gnome-extension install || warn "could not install the extension; retry with: ${BINARY_NAME} gnome-extension install"
+    warn "log out and back in so GNOME Shell loads the extension (Wayland cannot reload the shell in place)"
+  else
+    say "skipped — install later with: ${BINARY_NAME} gnome-extension install"
+  fi
+}
+
 # --- API key ----------------------------------------------------------------
 setup_api_key() {
   local env_file="$HOME/.dit.env"
@@ -457,6 +485,7 @@ This platform may not have a prebuilt binary — build from source instead (see 
 
   linux_deps
   linux_input_setup
+  gnome_focus_extension "$dest"
   setup_api_key
 
   # Smoke test (skip cross-OS shells where it can't run, e.g. windows under msys).

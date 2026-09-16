@@ -85,9 +85,16 @@ strip = true
 # path that bypasses the clipboard for typeable text (mitigation C), both in
 # src/linux_input.rs. Enabling option A is a deliberate footprint trade-off to
 # be made explicitly, not silently.
+#
+# Terminal-aware delivery asks for the focused window through two pure-Rust
+# clients: zbus (already in the tree via ksni) for the GNOME Shell extension's
+# session-bus interface, and x11rb (already in the tree via arboard) for
+# `_NET_ACTIVE_WINDOW` on X11 sessions. Neither links a C library.
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13.2"
 ksni = "0.3.4"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+x11rb = { version = "0.13", default-features = false }
 
 # macOS/Windows: native typing (enigo) + tray-icon on a tao event loop, with the
 # global hotkey via global-hotkey.

@@ -119,6 +119,51 @@ pub enum LayoutSetting {
     Abnt2,
 }
 
+/// How the Linux injector delivers a transcript.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DeliverySetting {
+    /// Terminal-aware: when the focused window is a known terminal showing a
+    /// zellij session, write the text into its focused pane as a bracketed
+    /// paste; otherwise use the clipboard paste chord (or typing with `--type`).
+    #[default]
+    Auto,
+    /// Always set the clipboard and emit the paste chord.
+    Paste,
+    /// Always type through the virtual keyboard (the `--type` path).
+    Type,
+}
+
+impl DeliverySetting {
+    /// The canonical config-file/CLI token for this delivery mode.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeliverySetting::Auto => "auto",
+            DeliverySetting::Paste => "paste",
+            DeliverySetting::Type => "type",
+        }
+    }
+
+    /// Whether the fallback path types instead of pasting. `--type` keeps
+    /// selecting typing for `auto`'s fallback; `paste`/`type` are absolute.
+    pub fn types(&self, type_flag: bool) -> bool {
+        match self {
+            DeliverySetting::Auto => type_flag,
+            DeliverySetting::Paste => false,
+            DeliverySetting::Type => true,
+        }
+    }
+}
+
+/// Parse a delivery token (`auto`, `paste`, `type`).
+pub(crate) fn parse_delivery(s: &str) -> Result<DeliverySetting> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(DeliverySetting::Auto),
+        "paste" => Ok(DeliverySetting::Paste),
+        "type" => Ok(DeliverySetting::Type),
+        other => bail!("delivery must be `auto`, `paste` or `type`, got {other}"),
+    }
+}
+
 /// Parse a layout token (`auto`, `us`, `abnt2`/`br`).
 pub(crate) fn parse_layout(s: &str) -> Result<LayoutSetting> {
     match s.to_ascii_lowercase().as_str() {
@@ -194,6 +239,14 @@ pub struct Cli {
     #[arg(long = "type")]
     pub type_hybrid: bool,
 
+    /// Linux only: how to deliver the transcript. `auto` writes into zellij as
+    /// a bracketed paste when the focused window is a terminal showing a
+    /// zellij session (needs focus detection: the GNOME Shell extension or
+    /// X11), and otherwise pastes (or types, with `--type`); `paste` always
+    /// uses the clipboard paste chord; `type` always types.
+    #[arg(long, default_value = "auto", value_name = "MODE")]
+    pub delivery: String,
+
     /// Path to a dotenv-style file holding `ELEVENLABS_API_KEY`.
     /// Defaults to `~/.dit.env`.
     #[arg(long)]
@@ -225,6 +278,11 @@ pub enum Command {
     },
     /// Diagnose keyboard, microphone, display/session, and API prerequisites.
     Doctor,
+    /// Manage the GNOME Shell focus bridge used by terminal-aware delivery.
+    GnomeExtension {
+        #[command(subcommand)]
+        action: GnomeExtensionAction,
+    },
     /// Update dit to the latest release (idempotent: a no-op when current).
     Update {
         /// Only report whether a newer release exists; install nothing.
@@ -288,6 +346,16 @@ pub enum ModelsAction {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum GnomeExtensionAction {
+    /// Install and enable the extension for the current user.
+    Install,
+    /// Disable and remove the extension.
+    Uninstall,
+    /// Show whether the extension is installed, enabled and answering.
+    Status,
+}
+
+#[derive(Subcommand, Debug)]
 pub enum ServiceAction {
     /// Install and enable the autostart user service.
     Install {
@@ -316,6 +384,7 @@ pub(crate) const DEFAULT_HOTKEY: &str = "F9";
 pub(crate) const DEFAULT_MODE: &str = "toggle";
 pub(crate) const DEFAULT_REGION: &str = "global";
 pub(crate) const DEFAULT_VAD_SILENCE: f64 = 1.5;
+pub(crate) const DEFAULT_DELIVERY: &str = "auto";
 pub const DEFAULT_SESSION_MAX_AGE_DAYS: u64 = 30;
 pub const DEFAULT_SESSION_MAX_COUNT: usize = 100;
 
@@ -342,6 +411,7 @@ pub struct SettingsLayer {
     pub session_max_count: Option<usize>,
     pub engine: Option<String>,
     pub layout: Option<String>,
+    pub delivery: Option<String>,
 }
 
 /// Settings after merging every layer over the built-in defaults. Distinct from
@@ -365,6 +435,7 @@ struct ResolvedSettings {
     session_max_count: usize,
     engine: String,
     layout: String,
+    delivery: String,
 }
 
 /// Merge the three override layers over the defaults. Later arguments win:
@@ -411,6 +482,12 @@ fn merge(file: SettingsLayer, env: SettingsLayer, cli: SettingsLayer) -> Resolve
         ),
         engine: pick("elevenlabs".into(), file.engine, env.engine, cli.engine),
         layout: pick("auto".into(), file.layout, env.layout, cli.layout),
+        delivery: pick(
+            DEFAULT_DELIVERY.into(),
+            file.delivery,
+            env.delivery,
+            cli.delivery,
+        ),
     }
 }
 
@@ -464,6 +541,7 @@ fn env_layer(get: impl Fn(&str) -> Option<String>) -> SettingsLayer {
         session_max_count: s("DIT_SESSION_MAX_COUNT").and_then(|v| v.parse().ok()),
         engine: s("DIT_ENGINE"),
         layout: s("DIT_LAYOUT"),
+        delivery: s("DIT_DELIVERY"),
     }
 }
 
@@ -489,6 +567,7 @@ fn cli_layer(cli: &Cli, matches: &ArgMatches) -> SettingsLayer {
         session_max_count: None,
         engine: on_cli("engine").then(|| cli.engine.clone()),
         layout: on_cli("layout").then(|| cli.layout.clone()),
+        delivery: on_cli("delivery").then(|| cli.delivery.clone()),
     }
 }
 
@@ -512,6 +591,7 @@ pub struct Config {
     pub session_max_count: usize,
     pub engine: Engine,
     pub layout: LayoutSetting,
+    pub delivery: DeliverySetting,
 }
 
 /// Target sample rate sent to the API (Scribe expects 16 kHz mono s16le).
@@ -558,6 +638,8 @@ impl Config {
             .with_context(|| format!("unsupported mode: {}", settings.mode))?;
         let layout = parse_layout(&settings.layout)
             .with_context(|| format!("unsupported layout: {}", settings.layout))?;
+        let delivery = parse_delivery(&settings.delivery)
+            .with_context(|| format!("unsupported delivery: {}", settings.delivery))?;
 
         // When using the local engine and the user didn't explicitly set a model,
         // default to the local model instead of the cloud model.
@@ -585,6 +667,7 @@ impl Config {
             session_max_count: settings.session_max_count,
             engine,
             layout,
+            delivery,
         })
     }
 
@@ -874,6 +957,7 @@ mod tests {
         assert_eq!(cli.mode, DEFAULT_MODE);
         assert_eq!(cli.region, DEFAULT_REGION);
         assert_eq!(cli.vad_silence, DEFAULT_VAD_SILENCE);
+        assert_eq!(cli.delivery, DEFAULT_DELIVERY);
     }
 
     #[test]
@@ -1052,6 +1136,66 @@ mod tests {
     }
 
     #[test]
+    fn delivery_defaults_to_auto_and_layers_through_file_env_and_cli() {
+        let empty = merge(
+            SettingsLayer::default(),
+            empty_env(),
+            SettingsLayer::default(),
+        );
+        assert_eq!(
+            parse_delivery(&empty.delivery).unwrap(),
+            DeliverySetting::Auto
+        );
+
+        let file = SettingsLayer {
+            delivery: Some("paste".into()),
+            ..Default::default()
+        };
+        let resolved = merge(file.clone(), empty_env(), SettingsLayer::default());
+        assert_eq!(resolved.delivery, "paste");
+
+        let env = env_layer(|k| (k == "DIT_DELIVERY").then(|| "type".into()));
+        assert_eq!(env.delivery.as_deref(), Some("type"));
+        let resolved = merge(file.clone(), env.clone(), SettingsLayer::default());
+        assert_eq!(resolved.delivery, "type", "env beats the file");
+
+        let matches = Cli::command().get_matches_from(["dit", "--delivery", "auto"]);
+        let cli = Cli::from_arg_matches(&matches).expect("parses");
+        let resolved = merge(file.clone(), env, cli_layer(&cli, &matches));
+        assert_eq!(resolved.delivery, "auto", "CLI beats env and file");
+
+        // Without --delivery on the command line, clap's default must not
+        // shadow the file.
+        let matches = Cli::command().get_matches_from(["dit", "--paste-shift"]);
+        let cli = Cli::from_arg_matches(&matches).expect("parses");
+        let layer = cli_layer(&cli, &matches);
+        assert_eq!(layer.delivery, None);
+        assert_eq!(merge(file, empty_env(), layer).delivery, "paste");
+    }
+
+    #[test]
+    fn delivery_tokens_parse_and_decide_typing() {
+        assert_eq!(parse_delivery("AUTO").unwrap(), DeliverySetting::Auto);
+        assert_eq!(parse_delivery(" paste ").unwrap(), DeliverySetting::Paste);
+        assert_eq!(parse_delivery("type").unwrap(), DeliverySetting::Type);
+        assert!(parse_delivery("zellij").is_err());
+
+        // `--type` still selects typing for auto's fallback…
+        assert!(DeliverySetting::Auto.types(true));
+        assert!(!DeliverySetting::Auto.types(false));
+        // …while explicit modes ignore it.
+        assert!(!DeliverySetting::Paste.types(true));
+        assert!(DeliverySetting::Type.types(false));
+        for d in [
+            DeliverySetting::Auto,
+            DeliverySetting::Paste,
+            DeliverySetting::Type,
+        ] {
+            assert_eq!(parse_delivery(d.as_str()).unwrap(), d);
+        }
+    }
+
+    #[test]
     fn passed_cli_flag_overrides_the_config_file() {
         // Regression guard: a value in config.toml is honoured, but a CLI flag
         // still wins — the contract for existing flags.
@@ -1183,6 +1327,7 @@ mod tests {
             session_max_count: DEFAULT_SESSION_MAX_COUNT,
             engine: Engine::ElevenLabs,
             layout: LayoutSetting::Auto,
+            delivery: DeliverySetting::Auto,
         }
     }
 

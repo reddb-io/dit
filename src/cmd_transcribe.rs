@@ -257,6 +257,7 @@ fn build_config(args: &TranscribeArgs, engine: Engine) -> Result<Config> {
         session_max_count: file.session_max_count.unwrap_or(DEFAULT_SESSION_MAX_COUNT),
         engine,
         layout: LayoutSetting::Auto,
+        delivery: config::DeliverySetting::Paste,
     })
 }
 
