@@ -131,9 +131,15 @@ fn check_linux_input() {}
 /// runs in the terminal that is focused, so this exercises the real route.
 #[cfg(target_os = "linux")]
 fn check_delivery_route() {
+    use crate::focus::paste_with_shift;
     use crate::terminal_route::{Plan, TerminalRouter};
 
-    let (focused, plan) = TerminalRouter::new().route();
+    let (focused, plan) = TerminalRouter::new(false).route();
+    let chord = if paste_with_shift(focused.as_ref(), false) {
+        "Ctrl+Shift+V"
+    } else {
+        "Ctrl+V"
+    };
     match &focused {
         Some(app) => status(
             true,
@@ -166,7 +172,7 @@ fn check_delivery_route() {
         Plan::Fallback(reason) => status(
             true,
             "terminal-aware delivery",
-            &format!("paste/type fallback: {reason}"),
+            &format!("{chord} paste/type fallback: {reason}"),
         ),
     }
 }
