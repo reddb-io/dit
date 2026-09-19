@@ -301,7 +301,8 @@ fn run_keyboard_reader(
 /// zellij session, it is written there as a bracketed paste and the
 /// clipboard/uinput path is skipped.
 ///
-/// `shift` selects Ctrl+Shift+V over Ctrl+V for the clipboard paste chord.
+/// `configured_shift` selects Ctrl+Shift+V as the fallback paste chord. In
+/// `auto`, a focused terminal selects it dynamically even when this is false.
 /// `type_hybrid` opts into the typing-first delivery path: characters `layout`
 /// can produce are injected as keystrokes via `/dev/uinput`, and only the
 /// characters it can't type (dead-key accents/symbols/emoji) fall back to the
@@ -309,20 +310,21 @@ fn run_keyboard_reader(
 pub fn run_injector(
     rx: Receiver<InjectMsg>,
     delivery: DeliverySetting,
-    shift: bool,
+    configured_shift: bool,
     type_hybrid: bool,
     layout: KeyboardLayout,
 ) {
-    let mut paster = match Paster::new(shift, type_hybrid, layout) {
+    let mut paster = match Paster::new(type_hybrid, layout) {
         Ok(p) => p,
         Err(e) => {
             error!("{e:#}");
             return;
         }
     };
-    let router = (delivery == DeliverySetting::Auto).then(TerminalRouter::new);
+    let router = (delivery == DeliverySetting::Auto).then(|| TerminalRouter::new(configured_shift));
     while let Ok(InjectMsg::Type(text)) = rx.recv() {
         let chars = text.chars().count();
+        let mut paste_with_shift = configured_shift;
         if let Some(router) = &router {
             match router.try_deliver(&text) {
                 Routed::Delivered => {
@@ -334,18 +336,20 @@ pub fn run_injector(
                     error!("delivery failed: zellij bracketed paste incomplete ({chars} chars)");
                     continue;
                 }
-                Routed::Fallback => {}
+                Routed::Fallback {
+                    paste_with_shift: selected,
+                } => paste_with_shift = selected,
             }
         }
         let mode = if type_hybrid {
             "typing (uinput, clipboard fallback)"
-        } else if shift {
+        } else if paste_with_shift {
             "clipboard + Ctrl+Shift+V paste chord"
         } else {
             "clipboard + Ctrl+V paste chord"
         };
         info!("delivery started: {mode} ({chars} chars)");
-        if let Err(e) = paster.deliver(&text) {
+        if let Err(e) = paster.deliver(&text, paste_with_shift) {
             error!("delivery failed: {mode} failed ({chars} chars): {e:#}");
         } else {
             debug!("delivered: {text}");
@@ -371,7 +375,6 @@ const CLIPBOARD_SET_ATTEMPTS: usize = 3;
 struct Paster {
     device: VirtualDevice,
     clipboard: arboard::Clipboard,
-    shift: bool,
     /// When true, deliver by typing (uinput) with a clipboard fallback for
     /// characters the active layout can't type; otherwise paste via clipboard.
     type_hybrid: bool,
@@ -380,7 +383,7 @@ struct Paster {
 }
 
 impl Paster {
-    fn new(shift: bool, type_hybrid: bool, layout: KeyboardLayout) -> Result<Self> {
+    fn new(type_hybrid: bool, layout: KeyboardLayout) -> Result<Self> {
         let clipboard = arboard::Clipboard::new().context("clipboard unavailable")?;
 
         let mut keys = AttributeSet::<KeyCode>::new();
@@ -411,26 +414,25 @@ impl Paster {
         Ok(Self {
             device,
             clipboard,
-            shift,
             type_hybrid,
             layout,
         })
     }
 
     /// Deliver `text` using the configured mode.
-    fn deliver(&mut self, text: &str) -> Result<()> {
+    fn deliver(&mut self, text: &str, paste_with_shift: bool) -> Result<()> {
         if self.type_hybrid {
-            self.deliver_typed(text)
+            self.deliver_typed(text, paste_with_shift)
         } else {
-            self.paste(text)
+            self.paste(text, paste_with_shift)
         }
     }
 
     /// Default path: set the clipboard (verified, with a settle to let the
     /// X11↔Wayland bridge sync) and emit the paste chord.
-    fn paste(&mut self, text: &str) -> Result<()> {
+    fn paste(&mut self, text: &str, paste_with_shift: bool) -> Result<()> {
         self.set_clipboard_verified(text)?;
-        self.emit_paste()
+        self.emit_paste(paste_with_shift)
     }
 
     /// Hybrid typing path. Walk the text in runs: type the runs the layout can
@@ -438,7 +440,7 @@ impl Paster {
     /// (dead-key accents/symbols/emoji) fall back to the clipboard. When the
     /// whole text is typeable the clipboard is never touched — so it is not
     /// clobbered and the Wayland image-paste bug cannot occur.
-    fn deliver_typed(&mut self, text: &str) -> Result<()> {
+    fn deliver_typed(&mut self, text: &str, paste_with_shift: bool) -> Result<()> {
         let segments = plan_segments(text, self.layout);
         let needs_clipboard = segments.iter().any(|s| matches!(s, Segment::Paste(_)));
         // Best-effort: only when a fallback is unavoidable do we save the user's
@@ -464,7 +466,7 @@ impl Paster {
                         run.chars().count()
                     );
                     self.set_clipboard_verified(&run)?;
-                    self.emit_paste()?;
+                    self.emit_paste(paste_with_shift)?;
                     // Let the target consume the paste before we touch the
                     // clipboard again (next fallback or restore).
                     std::thread::sleep(CLIPBOARD_SETTLE);
@@ -519,46 +521,55 @@ impl Paster {
     /// Type a single character: hold Shift if the layout needs it, tap the key,
     /// release. Small inter-event sleeps keep fast TUIs from dropping events.
     fn emit_char(&mut self, key: KeyCode, shift: bool) -> Result<()> {
-        let mut down = Vec::with_capacity(2);
-        if shift {
-            down.push(*KeyEvent::new(KeyCode::KEY_LEFTSHIFT, 1));
+        let modifiers = shift.then_some(KeyCode::KEY_LEFTSHIFT).into_iter();
+        for frame in chord_frames(modifiers, key) {
+            let events: Vec<_> = frame
+                .into_iter()
+                .map(|(key, value)| *KeyEvent::new(key, value))
+                .collect();
+            self.device.emit(&events)?;
+            std::thread::sleep(Duration::from_millis(2));
         }
-        down.push(*KeyEvent::new(key, 1));
-        self.device.emit(&down)?;
-        std::thread::sleep(Duration::from_millis(2));
-
-        let mut up = Vec::with_capacity(2);
-        up.push(*KeyEvent::new(key, 0));
-        if shift {
-            up.push(*KeyEvent::new(KeyCode::KEY_LEFTSHIFT, 0));
-        }
-        self.device.emit(&up)?;
-        std::thread::sleep(Duration::from_millis(1));
         Ok(())
     }
 
-    fn emit_paste(&mut self) -> Result<()> {
+    fn emit_paste(&mut self, shift: bool) -> Result<()> {
         info!(
             "delivery checkpoint: emitting {} via /dev/uinput",
-            if self.shift { "Ctrl+Shift+V" } else { "Ctrl+V" }
+            if shift { "Ctrl+Shift+V" } else { "Ctrl+V" }
         );
-        let mut down = vec![*KeyEvent::new(KeyCode::KEY_LEFTCTRL, 1)];
-        if self.shift {
-            down.push(*KeyEvent::new(KeyCode::KEY_LEFTSHIFT, 1));
+        let modifiers = [KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT];
+        let modifier_count = if shift { 2 } else { 1 };
+        for frame in chord_frames(modifiers[..modifier_count].iter().copied(), KeyCode::KEY_V) {
+            let events: Vec<_> = frame
+                .into_iter()
+                .map(|(key, value)| *KeyEvent::new(key, value))
+                .collect();
+            self.device.emit(&events)?;
+            std::thread::sleep(Duration::from_millis(8));
         }
-        down.push(*KeyEvent::new(KeyCode::KEY_V, 1));
-        self.device.emit(&down)?;
-
-        std::thread::sleep(Duration::from_millis(8));
-
-        let mut up = vec![*KeyEvent::new(KeyCode::KEY_V, 0)];
-        if self.shift {
-            up.push(*KeyEvent::new(KeyCode::KEY_LEFTSHIFT, 0));
-        }
-        up.push(*KeyEvent::new(KeyCode::KEY_LEFTCTRL, 0));
-        self.device.emit(&up)?;
         Ok(())
     }
+}
+
+/// Separate modifier state and the printable key into distinct evdev frames.
+/// Each frame ends in its own SYN_REPORT, so compositors cannot observe `V`
+/// before Ctrl/Shift has become active (the cause of intermittent literal `v`).
+fn chord_frames(
+    modifiers: impl IntoIterator<Item = KeyCode>,
+    key: KeyCode,
+) -> Vec<Vec<(KeyCode, i32)>> {
+    let modifiers: Vec<KeyCode> = modifiers.into_iter().collect();
+    let mut frames = Vec::with_capacity(if modifiers.is_empty() { 2 } else { 4 });
+    if !modifiers.is_empty() {
+        frames.push(modifiers.iter().map(|key| (*key, 1)).collect());
+    }
+    frames.push(vec![(key, 1)]);
+    frames.push(vec![(key, 0)]);
+    if !modifiers.is_empty() {
+        frames.push(modifiers.iter().rev().map(|key| (*key, 0)).collect());
+    }
+    frames
 }
 
 // ── Hybrid typing: delivery planning ──────────────────────────────────────────
@@ -698,6 +709,22 @@ mod tests {
             let segments = plan_segments("the quick brown fox: jumps! (123)", layout);
             assert!(segments.iter().all(|s| matches!(s, Segment::Type(_))));
         }
+    }
+
+    #[test]
+    fn paste_chord_commits_modifiers_before_v() {
+        assert_eq!(
+            chord_frames(
+                [KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT],
+                KeyCode::KEY_V
+            ),
+            vec![
+                vec![(KeyCode::KEY_LEFTCTRL, 1), (KeyCode::KEY_LEFTSHIFT, 1),],
+                vec![(KeyCode::KEY_V, 1)],
+                vec![(KeyCode::KEY_V, 0)],
+                vec![(KeyCode::KEY_LEFTSHIFT, 0), (KeyCode::KEY_LEFTCTRL, 0),],
+            ]
+        );
     }
 
     #[test]

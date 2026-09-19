@@ -85,6 +85,13 @@ pub fn terminal_name(app: &FocusedApp) -> Option<&'static str> {
     })
 }
 
+/// Whether clipboard delivery should use the terminal paste chord for the
+/// focused app. The configured value remains the fallback when focus is
+/// unavailable or the focused window is not a known terminal.
+pub fn paste_with_shift(app: Option<&FocusedApp>, configured: bool) -> bool {
+    configured || app.and_then(terminal_name).is_some()
+}
+
 /// Whether the X11 provider should be consulted. `XDG_SESSION_TYPE` decides
 /// when set; otherwise an X `DISPLAY` without a `WAYLAND_DISPLAY` means X11.
 fn session_is_x11(get: impl Fn(&str) -> Option<String>) -> bool {
@@ -300,6 +307,20 @@ mod tests {
         ] {
             assert_eq!(terminal_name(&focused), None, "focused app {focused:?}");
         }
+    }
+
+    #[test]
+    fn terminals_select_ctrl_shift_v_without_manual_configuration() {
+        assert!(paste_with_shift(
+            Some(&app("Alacritty.desktop", "Alacritty")),
+            false
+        ));
+        assert!(!paste_with_shift(
+            Some(&app("firefox.desktop", "firefox")),
+            false
+        ));
+        assert!(!paste_with_shift(None, false));
+        assert!(paste_with_shift(None, true));
     }
 
     #[test]
