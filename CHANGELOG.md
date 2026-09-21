@@ -2,6 +2,20 @@
 ## What's in 0.5.0
 
 
+### Chores
+
+- release v0.5.0 ([#61](https://github.com/reddb-io/dit/pull/61))
+
+
+### Features
+
+- manage ElevenLabs API key in Red config ([#60](https://github.com/reddb-io/dit/pull/60))
+
+
+
+## What's in 0.5.0
+
+
 ### Features
 
 - manage ElevenLabs API key in Red config ([#60](https://github.com/reddb-io/dit/pull/60))
