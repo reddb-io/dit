@@ -124,7 +124,8 @@ pub enum LayoutSetting {
 pub enum DeliverySetting {
     /// Terminal-aware: when the focused window is a known terminal showing a
     /// zellij session, write the text into its focused pane as a bracketed
-    /// paste; otherwise use the clipboard paste chord (or typing with `--type`).
+    /// paste; otherwise choose Ctrl+Shift+V for known terminals and Ctrl+V for
+    /// other apps (or type with `--type`).
     #[default]
     Auto,
     /// Always set the clipboard and emit the paste chord.
@@ -225,7 +226,8 @@ pub struct Cli {
     #[arg(long)]
     pub no_preview: bool,
 
-    /// On Wayland, paste with Ctrl+Shift+V instead of Ctrl+V (for terminals).
+    /// Linux: force Ctrl+Shift+V for paste fallbacks whose focused app cannot
+    /// be identified. Auto delivery already selects it for known terminals.
     #[arg(long)]
     pub paste_shift: bool,
 
@@ -242,8 +244,9 @@ pub struct Cli {
     /// Linux only: how to deliver the transcript. `auto` writes into zellij as
     /// a bracketed paste when the focused window is a terminal showing a
     /// zellij session (needs focus detection: the GNOME Shell extension or
-    /// X11), and otherwise pastes (or types, with `--type`); `paste` always
-    /// uses the clipboard paste chord; `type` always types.
+    /// X11), and otherwise selects the focused app's paste chord (or types,
+    /// with `--type`); `paste` always uses the configured clipboard paste
+    /// chord; `type` always types.
     #[arg(long, default_value = "auto", value_name = "MODE")]
     pub delivery: String,
 

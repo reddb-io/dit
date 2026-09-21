@@ -17,7 +17,7 @@ use std::path::Path;
 use tracing::{debug, info, warn};
 
 use crate::config::DeliverySetting;
-use crate::focus::{terminal_name, FocusDetector, FocusedApp};
+use crate::focus::{paste_with_shift, terminal_name, FocusDetector, FocusedApp};
 use crate::zellij::{self, ProcTable, Target, WriteError};
 
 /// Outcome of one routed delivery attempt.
@@ -26,7 +26,7 @@ pub enum Routed {
     /// The text was written into zellij; nothing else to do.
     Delivered,
     /// Nothing was written; deliver through the fallback path.
-    Fallback,
+    Fallback { paste_with_shift: bool },
     /// A partial write happened; do not fall back (it would duplicate text).
     Failed,
 }
@@ -77,18 +77,21 @@ fn describe(app: &FocusedApp) -> String {
 /// Owns the focus detector for the injector thread.
 pub struct TerminalRouter {
     focus: FocusDetector,
+    configured_paste_shift: bool,
 }
 
 impl TerminalRouter {
-    pub fn new() -> Self {
+    pub fn new(configured_paste_shift: bool) -> Self {
         Self {
             focus: FocusDetector::new(),
+            configured_paste_shift,
         }
     }
 
     /// Try to deliver `text` through zellij.
     pub fn try_deliver(&self, text: &str) -> Routed {
         let (focused, route) = self.route();
+        let paste_with_shift = paste_with_shift(focused.as_ref(), self.configured_paste_shift);
         if let Some(app) = &focused {
             debug!(
                 "focus ({}): app_id={:?} wm_class={:?} pid={:?}",
@@ -98,7 +101,7 @@ impl TerminalRouter {
         match route {
             Plan::Fallback(reason) => {
                 info!("delivery route: fallback ({reason})");
-                Routed::Fallback
+                Routed::Fallback { paste_with_shift }
             }
             Plan::Zellij { terminal, target } => {
                 info!(
@@ -110,7 +113,7 @@ impl TerminalRouter {
                     Ok(()) => Routed::Delivered,
                     Err(WriteError::NotDelivered(e)) => {
                         info!("delivery route: zellij write failed, falling back: {e:#}");
-                        Routed::Fallback
+                        Routed::Fallback { paste_with_shift }
                     }
                     Err(WriteError::Partial(e)) => {
                         warn!("delivery route: zellij write failed mid-paste: {e:#}");

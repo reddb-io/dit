@@ -23,7 +23,8 @@ pub struct Injector {
 impl Injector {
     /// Spawn the injector thread. On Linux this honours `cfg.delivery`
     /// (terminal-aware zellij routing, or a fixed paste/type path),
-    /// `cfg.paste_shift` (Ctrl+Shift+V instead of Ctrl+V, for terminals),
+    /// `cfg.paste_shift` (the fallback when auto focus detection is unavailable;
+    /// known terminals select Ctrl+Shift+V automatically),
     /// `cfg.type_hybrid` (type via uinput with a clipboard fallback instead of
     /// pasting) and
     /// `cfg.layout` (which char → keycode map the typing path uses; `auto`

@@ -208,7 +208,7 @@ dit --hotkey "RightAlt+F9"   # combo
 | `--vad-silence <SECS>` | `1.5` | Silence before segment commits (ElevenLabs only) |
 | `--region` | `global` | API region: `global`, `us`, `eu`, `in` (ElevenLabs only) |
 | `--no-preview` | off | Disable live terminal preview |
-| `--paste-shift` | off | Linux: paste with `Ctrl+Shift+V` (for terminals) |
+| `--paste-shift` | off | Linux: force `Ctrl+Shift+V` when auto focus detection is unavailable |
 | `--type` | off | Linux: type via uinput instead of clipboard |
 | `--delivery` | `auto` | Linux: `auto` (zellij-aware, see [Terminals and zellij](#terminals-and-zellij)), `paste`, or `type` |
 | `--layout` | `auto` | Linux `--type` keyboard layout: `auto`, `us`, `abnt2` |
@@ -326,7 +326,7 @@ dit service uninstall
 > # log out and back in
 > ```
 >
-> In terminals, use `--paste-shift` (`Ctrl+Shift+V`) or `--type` (uinput typing, bypasses clipboard entirely — avoids GNOME/Wayland intermittently interpreting the clipboard as an image after a screenshot copy).
+> With the default `delivery = "auto"`, dit detects the focused app for every transcript and uses `Ctrl+Shift+V` in known terminals or `Ctrl+V` in other apps. Use `--paste-shift` to force the terminal chord when focus detection is unavailable, or `--type` for uinput typing (bypasses the clipboard almost entirely — avoiding GNOME/Wayland intermittently interpreting the clipboard as an image after a screenshot copy).
 >
 > `--type` is layout-aware: dit detects the active keyboard layout (XKB env → GNOME settings → setxkbmap → localectl → locale) and maps characters accordingly. `us` and `abnt2` (Brazilian) are supported — on ABNT2, `ç` is typed directly and dead-key accents ride the clipboard fallback. Pin it with `--layout us|abnt2` (or `layout = "abnt2"` in config.toml) if detection guesses wrong; `dit doctor` shows what was detected.
 
@@ -340,7 +340,7 @@ zellij --session <name> action write <text>
 zellij --session <name> action write ESC[201~
 ```
 
-Shells, editors and agent TUIs (bash, vim, nano, Claude Code, Codex, redcode) then see pasted text, so a newline never submits, and nothing depends on the terminal's paste shortcut or the clipboard. Escape and other control characters (everything but tabs and newlines) are stripped from the transcript first, so dictated text can never end the paste early. Everything else — other apps, a terminal without zellij, or any doubt about which session is focused — keeps the normal clipboard paste chord (`--paste-shift`) or `--type`.
+Shells, editors and agent TUIs (bash, fish, vim, nano, Claude Code, Codex, redcode) then see pasted text, so a newline never submits, and nothing depends on the terminal's paste shortcut or the clipboard. Escape and other control characters (everything but tabs and newlines) are stripped from the transcript first, so dictated text can never end the paste early. A detected terminal without a reachable zellij session falls back to `Ctrl+Shift+V`; other apps use `Ctrl+V`. If focus is unknown, dit keeps the configured fallback (`Ctrl+V`, `--paste-shift`, or `--type`). Modifier state and `V` are emitted in separate input frames so Wayland compositors cannot mistake the shortcut for a literal `v`.
 
 How the session is found: dit walks the focused window's process tree for a `zellij` client and reads the session from its command line (`zellij attach NAME`, `zellij --session NAME`) or its `ZELLIJ_SESSION_NAME`; it talks to the server with that client's own binary and `ZELLIJ_SOCKET_DIR`. A client that doesn't name its session is matched by the window title, or by being the only live session. When the focused window's pid is unknown, the only live session (or the one the title names) is used.
 
