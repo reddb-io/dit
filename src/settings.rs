@@ -80,7 +80,7 @@ pub fn run() -> Result<()> {
 
 #[cfg(feature = "gui")]
 fn env_file_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".dit.env"))
+    crate::config::migrate_legacy_env_file().ok().flatten()
 }
 
 #[cfg(feature = "gui")]
@@ -96,6 +96,15 @@ fn persist_api_key(key: &str) -> Result<()> {
     use std::io::Write;
 
     let path = env_file_path().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("credential path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+    }
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let mut options = std::fs::OpenOptions::new();
     options.create(true).write(true).truncate(true);
@@ -421,6 +430,7 @@ impl SettingsApp {
             Tab::Models => return,
         };
         self.status = match result {
+            Ok(()) if self.tab == Tab::Account => "Saved. The next recording uses this key.".into(),
             Ok(()) => "Saved.".into(),
             Err(e) => format!("Error: {e}"),
         };

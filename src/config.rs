@@ -1,7 +1,7 @@
 //! Configuration: CLI flags, env-file loading and the derived runtime settings.
 //!
 //! Mirrors `whisperflow.py`'s config block: it reads `ELEVENLABS_API_KEY` from a
-//! dotenv-style file (default `~/.dit.env`) or the process environment, and
+//! dotenv-style file (default `~/.red/dit/.env`) or the process environment, and
 //! exposes the model/language/hotkey knobs.
 
 use std::path::{Path, PathBuf};
@@ -251,7 +251,7 @@ pub struct Cli {
     pub delivery: String,
 
     /// Path to a dotenv-style file holding `ELEVENLABS_API_KEY`.
-    /// Defaults to `~/.dit.env`.
+    /// Defaults to `~/.red/dit/.env`.
     #[arg(long)]
     pub env_file: Option<PathBuf>,
 
@@ -607,10 +607,10 @@ pub const FINAL_WAIT_SECS: f64 = 3.0;
 
 impl Config {
     pub fn resolve(cli: &Cli, matches: &ArgMatches) -> Result<Self> {
-        let env_path = cli
-            .env_file
-            .clone()
-            .or_else(|| dirs::home_dir().map(|h| h.join(".dit.env")));
+        let env_path = match cli.env_file.clone() {
+            Some(path) => Some(path),
+            None => migrate_legacy_env_file()?,
+        };
         if let Some(path) = &env_path {
             load_env_file(path);
         }
@@ -633,7 +633,7 @@ impl Config {
                 env_path
                     .as_ref()
                     .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "~/.dit.env".into())
+                    .unwrap_or_else(|| "~/.red/dit/.env".into())
             );
         }
 
@@ -741,6 +741,40 @@ impl Config {
         }
         url
     }
+}
+
+/// The one credential file shared by the daemon, batch command, doctor and GUI.
+pub(crate) fn env_file_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".red/dit/.env"))
+}
+
+/// Move the pre-0.4.2 credential into the Red namespace on first use.
+pub(crate) fn migrate_legacy_env_file() -> Result<Option<PathBuf>> {
+    let Some(path) = env_file_path() else {
+        return Ok(None);
+    };
+    if path.exists() {
+        return Ok(Some(path));
+    }
+    let Some(home) = dirs::home_dir() else {
+        return Ok(Some(path));
+    };
+    let legacy = home.join(".dit.env");
+    if !legacy.exists() {
+        return Ok(Some(path));
+    }
+    let parent = path.parent().context("credential path has no parent")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("cannot create {}", parent.display()))?;
+    std::fs::rename(&legacy, &path)
+        .with_context(|| format!("cannot move {} to {}", legacy.display(), path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(Some(path))
 }
 
 /// A single runtime setting change requested from the tray control surface.

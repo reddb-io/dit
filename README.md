@@ -126,7 +126,9 @@ sudo apt-get install -y libxkbcommon-dev libgl1-mesa-dev
 ### ElevenLabs engine (API key)
 
 ```bash
-echo 'ELEVENLABS_API_KEY=sk_your_key_here' > ~/.dit.env
+mkdir -p ~/.red/dit && chmod 700 ~/.red/dit
+echo 'ELEVENLABS_API_KEY=sk_your_key_here' > ~/.red/dit/.env
+chmod 600 ~/.red/dit/.env
 ```
 
 Or use the settings GUI: `dit settings` → Account tab.
@@ -212,7 +214,7 @@ dit --hotkey "RightAlt+F9"   # combo
 | `--type` | off | Linux: type via uinput instead of clipboard |
 | `--delivery` | `auto` | Linux: `auto` (zellij-aware, see [Terminals and zellij](#terminals-and-zellij)), `paste`, or `type` |
 | `--layout` | `auto` | Linux `--type` keyboard layout: `auto`, `us`, `abnt2` |
-| `--env-file` | `~/.dit.env` | Path to the API key file |
+| `--env-file` | `~/.red/dit/.env` | Path to the API key file |
 | `--list-devices` | — | Print input devices and exit |
 
 ---
@@ -252,7 +254,9 @@ dit settings     # open the settings window
 | **Account** | ElevenLabs API key |
 | **About** | Version info |
 
-All settings persist to `~/.dit/config.toml` and are shared with the CLI. The tray's **Settings…** menu item also opens this window.
+Settings persist to `~/.dit/config.toml`; the ElevenLabs key lives separately at
+`~/.red/dit/.env`. Both are shared with the CLI. The tray's **Settings…** menu
+item opens this window, and a saved key is used by the next recording.
 
 ---
 

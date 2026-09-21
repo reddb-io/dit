@@ -475,7 +475,8 @@ jobs:
           ## Configure
 
           \`\`\`bash
-          echo 'ELEVENLABS_API_KEY=sk_your_key_here' > ~/.dit.env
+          mkdir -p ~/.red/dit
+          echo 'ELEVENLABS_API_KEY=sk_your_key_here' > ~/.red/dit/.env
           \`\`\`
 
           Run \`dit\`, press **F9**, speak, press **F9** again. See the [README](https://github.com/${REPO}#readme) for platform notes.

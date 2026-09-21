@@ -34,14 +34,15 @@ fn check_local_engine() {
 }
 
 fn check_api_key() {
-    let present = std::env::var_os("ELEVENLABS_API_KEY").is_some()
-        || dirs::home_dir()
-            .map(|h| h.join(".dit.env").exists())
-            .unwrap_or(false);
+    let managed = crate::config::migrate_legacy_env_file()
+        .ok()
+        .flatten()
+        .is_some_and(|path| path.exists());
+    let present = std::env::var_os("ELEVENLABS_API_KEY").is_some() || managed;
     status(
         present,
         "ElevenLabs API key",
-        "ELEVENLABS_API_KEY env or ~/.dit.env found",
+        "ELEVENLABS_API_KEY env or ~/.red/dit/.env found",
     );
 }
 
