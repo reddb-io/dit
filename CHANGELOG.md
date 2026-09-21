@@ -1,4 +1,16 @@
 
+## What's in 0.5.0
+
+
+### Features
+
+- manage ElevenLabs API key in Red config ([#60](https://github.com/reddb-io/dit/pull/60))
+
+
+
+**Full Changelog**: https://github.com/reddb-io/dit/compare/v0.4.1...v0.5.0
+
+
 ## What's in 0.4.1
 
 
