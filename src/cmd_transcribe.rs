@@ -218,6 +218,7 @@ fn build_config(args: &TranscribeArgs, engine: Engine) -> Result<Config> {
         anyhow::bail!(
             "ELEVENLABS_API_KEY is not set. Put it in {} or export it in the environment.",
             env_path
+                .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "~/.dit.env".into())
         );
@@ -235,6 +236,7 @@ fn build_config(args: &TranscribeArgs, engine: Engine) -> Result<Config> {
 
     Ok(Config {
         api_key,
+        api_key_file: env_path,
         language: args.language.clone(),
         model,
         // Hotkey is unused for transcription; use a harmless default.

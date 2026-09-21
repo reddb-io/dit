@@ -93,9 +93,24 @@ fn load_api_key() -> String {
 
 #[cfg(feature = "gui")]
 fn persist_api_key(key: &str) -> Result<()> {
+    use std::io::Write;
+
     let path = env_file_path().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    std::fs::write(&path, patch_env_key(&existing, "ELEVENLABS_API_KEY", key))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    file.write_all(patch_env_key(&existing, "ELEVENLABS_API_KEY", key).as_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 
@@ -360,7 +375,7 @@ impl SettingsApp {
     /// Stop the current VU capture thread and start a new one for the selected device.
     fn restart_vu(&mut self) {
         use std::sync::{
-            atomic::{AtomicBool, AtomicU32, Ordering},
+            atomic::{AtomicBool, Ordering},
             Arc,
         };
         self.vu_stop.store(true, Ordering::Relaxed);
