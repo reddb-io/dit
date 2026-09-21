@@ -1,4 +1,17 @@
 
+## What's in 0.4.1
+
+
+### Bug Fixes
+
+- **linux**: adapt paste chord to focused app ([#56](https://github.com/reddb-io/dit/pull/56))
+- ship settings in release builds ([#57](https://github.com/reddb-io/dit/pull/57))
+
+
+
+**Full Changelog**: https://github.com/reddb-io/dit/compare/v0.4.0...v0.4.1
+
+
 ## What's in 0.4.0
 
 
