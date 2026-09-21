@@ -228,8 +228,14 @@ async fn manager(
                          state_tx: &UnboundedSender<IconState>|
      -> (Arc<Notify>, JoinHandle<Result<()>>) {
         let stop = Arc::new(Notify::new());
+        let mut session_cfg = cfg.clone();
+        match session_cfg.reload_api_key() {
+            Ok(true) => info!("reloaded ElevenLabs API key for the next session"),
+            Ok(false) => {}
+            Err(error) => error!("could not reload ElevenLabs API key: {error:#}"),
+        }
         let handle = tokio::spawn(run_session(
-            cfg.clone(),
+            session_cfg,
             injector.clone(),
             stop.clone(),
             state_tx.clone(),

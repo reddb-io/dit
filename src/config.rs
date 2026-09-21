@@ -575,6 +575,7 @@ fn cli_layer(cli: &Cli, matches: &ArgMatches) -> SettingsLayer {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub api_key: String,
+    pub(crate) api_key_file: Option<PathBuf>,
     pub language: String,
     pub model: String,
     pub hotkey: Hotkey,
@@ -627,6 +628,7 @@ impl Config {
             bail!(
                 "ELEVENLABS_API_KEY is not set. Put it in {} or export it in the environment.",
                 env_path
+                    .as_ref()
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| "~/.dit.env".into())
             );
@@ -651,6 +653,7 @@ impl Config {
 
         Ok(Self {
             api_key,
+            api_key_file: env_path,
             language: settings.language,
             model,
             hotkey,
@@ -669,6 +672,30 @@ impl Config {
             layout,
             delivery,
         })
+    }
+
+    /// Refresh the credential saved by `dit settings` before opening a new
+    /// ElevenLabs session. An existing WebSocket keeps the credential it was
+    /// authenticated with; the next recording observes the edited file.
+    pub fn reload_api_key(&mut self) -> Result<bool> {
+        let Some(path) = &self.api_key_file else {
+            return Ok(false);
+        };
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", path.display()))
+            }
+        };
+        let Some(key) = env_value(&contents, "ELEVENLABS_API_KEY") else {
+            return Ok(false);
+        };
+        if self.api_key == key {
+            return Ok(false);
+        }
+        self.api_key = key;
+        Ok(true)
     }
 
     /// Resolve the API host for the configured region (data residency).
@@ -829,6 +856,17 @@ pub(crate) fn load_env_file(path: &PathBuf) {
             }
         }
     }
+}
+
+fn env_value(contents: &str, wanted: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let (key, value) = line.split_once('=')?;
+        (key.trim() == wanted).then(|| value.trim().to_string())
+    })
 }
 
 /// Parse the engine name into an [`Engine`].
@@ -1308,6 +1346,7 @@ mod tests {
     fn dummy_config(language: &str) -> Config {
         Config {
             api_key: "key".into(),
+            api_key_file: None,
             language: language.into(),
             model: "scribe_v2_realtime".into(),
             hotkey: Hotkey {
@@ -1329,6 +1368,23 @@ mod tests {
             layout: LayoutSetting::Auto,
             delivery: DeliverySetting::Auto,
         }
+    }
+
+    #[test]
+    fn api_key_edit_applies_to_the_next_session() {
+        let path =
+            std::env::temp_dir().join(format!("dit-api-key-reload-{}.env", std::process::id()));
+        std::fs::write(&path, "ELEVENLABS_API_KEY=old-key\n").unwrap();
+        let mut cfg = dummy_config("pt");
+        cfg.api_key = "old-key".into();
+        cfg.api_key_file = Some(path.clone());
+
+        std::fs::write(&path, "ELEVENLABS_API_KEY=new-key\n").unwrap();
+        assert!(cfg.reload_api_key().unwrap());
+        assert_eq!(cfg.api_key, "new-key");
+        assert!(!cfg.reload_api_key().unwrap());
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
