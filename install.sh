@@ -10,7 +10,7 @@
 # Flags:
 #   --version <vX.Y.Z>     install a specific release (default: latest)
 #   --install-dir <path>   install location (default: ~/.local/bin)
-#   --api-key <key>        write this ElevenLabs key to ~/.dit.env
+#   --api-key <key>        write this ElevenLabs key to ~/.red/dit/.env
 #   --with-service         install the autostart user service
 #   --no-service           never install the service
 #   --no-gnome-extension   skip the GNOME Shell focus bridge (terminal-aware delivery)
@@ -392,7 +392,14 @@ gnome_focus_extension() {
 
 # --- API key ----------------------------------------------------------------
 setup_api_key() {
-  local env_file="$HOME/.dit.env"
+  local env_dir="$HOME/.red/dit" env_file="$HOME/.red/dit/.env" legacy="$HOME/.dit.env"
+  mkdir -p "$env_dir"
+  chmod 700 "$HOME/.red" "$env_dir" 2>/dev/null || true
+  if [[ ! -e "$env_file" && -f "$legacy" ]]; then
+    mv "$legacy" "$env_file"
+    chmod 600 "$env_file"
+    ok "moved API key to $env_file"
+  fi
   if [[ -n "$API_KEY" ]]; then
     umask 177; printf 'ELEVENLABS_API_KEY=%s\n' "$API_KEY" > "$env_file"
     ok "wrote API key to $env_file"

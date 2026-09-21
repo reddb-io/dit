@@ -204,10 +204,10 @@ async fn transcribe_pcm(engine: Engine, cfg: &Config, pcm: Vec<i16>) -> Result<S
 
 fn build_config(args: &TranscribeArgs, engine: Engine) -> Result<Config> {
     // Load API key from the env file (if present) then from the process env.
-    let env_path = args
-        .env_file
-        .clone()
-        .or_else(|| dirs::home_dir().map(|h| h.join(".dit.env")));
+    let env_path = match args.env_file.clone() {
+        Some(path) => Some(path),
+        None => config::migrate_legacy_env_file()?,
+    };
     if let Some(ref path) = env_path {
         config::load_env_file(path);
     }
@@ -220,7 +220,7 @@ fn build_config(args: &TranscribeArgs, engine: Engine) -> Result<Config> {
             env_path
                 .as_ref()
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "~/.dit.env".into())
+                .unwrap_or_else(|| "~/.red/dit/.env".into())
         );
     }
 

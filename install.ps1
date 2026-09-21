@@ -99,5 +99,6 @@ if ($userPath -notlike "*$InstallDir*") {
 Write-Host ""
 Write-Host "✓ done" -ForegroundColor Green
 Write-Host "Next:"
-Write-Host "  'ELEVENLABS_API_KEY=sk_your_key_here' | Out-File -Encoding ascii `"$env:USERPROFILE\.dit.env`""
+Write-Host "  New-Item -ItemType Directory -Force `"$env:USERPROFILE\.red\dit`" | Out-Null"
+Write-Host "  'ELEVENLABS_API_KEY=sk_your_key_here' | Out-File -Encoding ascii `"$env:USERPROFILE\.red\dit\.env`""
 Write-Host "  dit --help     # press F9 to start/stop dictation"
