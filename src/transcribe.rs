@@ -29,7 +29,9 @@ pub async fn run_session(
     state: mpsc::UnboundedSender<IconState>,
 ) -> Result<()> {
     let _ = state.send(IconState::Recording { level: 0 });
-    let result = session_inner(cfg, injector, stop, state.clone()).await;
+    injector.start();
+    let result = session_inner(cfg, injector.clone(), stop, state.clone()).await;
+    injector.finish();
     let _ = state.send(if result.is_ok() {
         IconState::Idle
     } else {

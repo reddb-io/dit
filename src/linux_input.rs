@@ -314,6 +314,12 @@ pub fn run_injector(
     type_hybrid: bool,
     layout: KeyboardLayout,
 ) {
+    enum VoiceRoute {
+        Sink(crate::redcode::VoiceSink),
+        Fallback,
+        Failed,
+    }
+
     let mut paster = match Paster::new(type_hybrid, layout) {
         Ok(p) => p,
         Err(e) => {
@@ -322,40 +328,103 @@ pub fn run_injector(
         }
     };
     let router = (delivery == DeliverySetting::Auto).then(|| TerminalRouter::new(configured_shift));
-    while let Ok(InjectMsg::Type(text)) = rx.recv() {
-        let chars = text.chars().count();
-        let mut paste_with_shift = configured_shift;
-        if let Some(router) = &router {
-            match router.try_deliver(&text) {
-                Routed::Delivered => {
-                    debug!("delivered: {text}");
-                    info!("delivery emitted: zellij bracketed paste ({chars} chars)");
-                    continue;
-                }
-                Routed::Failed => {
-                    error!("delivery failed: zellij bracketed paste incomplete ({chars} chars)");
-                    continue;
-                }
-                Routed::Fallback {
-                    paste_with_shift: selected,
-                } => paste_with_shift = selected,
+    let mut voice: Option<(String, VoiceRoute)> = None;
+    while let Ok(message) = rx.recv() {
+        match message {
+            InjectMsg::Start(dictation_id) => {
+                let sink = router.as_ref().and_then(|router| {
+                    let (focused, plan) = router.route();
+                    crate::redcode::VoiceSink::connect(focused.as_ref(), &plan, &dictation_id)
+                });
+                voice = Some((
+                    dictation_id,
+                    sink.map(VoiceRoute::Sink).unwrap_or(VoiceRoute::Fallback),
+                ));
             }
-        }
-        let mode = if type_hybrid {
-            "typing (uinput, clipboard fallback)"
-        } else if paste_with_shift {
-            "clipboard + Ctrl+Shift+V paste chord"
-        } else {
-            "clipboard + Ctrl+V paste chord"
-        };
-        info!("delivery started: {mode} ({chars} chars)");
-        if let Err(e) = paster.deliver(&text, paste_with_shift) {
-            error!("delivery failed: {mode} failed ({chars} chars): {e:#}");
-        } else {
-            debug!("delivered: {text}");
-            info!("delivery emitted: {mode} ({chars} chars)");
+            InjectMsg::Partial { dictation_id, text } => {
+                if let Some((active, VoiceRoute::Sink(sink))) = &mut voice {
+                    if *active == dictation_id && !sink.partial(&text) {
+                        error!("delivery failed: Redcode voice sink rejected partial transcript");
+                        voice = Some((dictation_id, VoiceRoute::Failed));
+                    }
+                }
+            }
+            InjectMsg::Commit { dictation_id, text } => match &mut voice {
+                Some((active, VoiceRoute::Sink(sink))) if *active == dictation_id => {
+                    if !sink.commit(&text) {
+                        error!("delivery failed: Redcode voice sink rejected committed transcript");
+                        voice = Some((dictation_id, VoiceRoute::Failed));
+                    }
+                }
+                Some((active, VoiceRoute::Fallback)) if *active == dictation_id => {
+                    deliver_text(
+                        &mut paster,
+                        router.as_ref(),
+                        &format!("{text} "),
+                        configured_shift,
+                        type_hybrid,
+                    );
+                }
+                _ => {}
+            },
+            InjectMsg::Finish(dictation_id) => {
+                if let Some((active, VoiceRoute::Sink(sink))) = &mut voice {
+                    if *active == dictation_id && !sink.finish() {
+                        error!("delivery failed: Redcode voice sink did not finish cleanly");
+                    }
+                }
+                voice = None;
+            }
+            InjectMsg::Type(text) => deliver_text(
+                &mut paster,
+                router.as_ref(),
+                &text,
+                configured_shift,
+                type_hybrid,
+            ),
         }
     }
+}
+
+fn deliver_text(
+    paster: &mut Paster,
+    router: Option<&TerminalRouter>,
+    text: &str,
+    configured_shift: bool,
+    type_hybrid: bool,
+) {
+    let chars = text.chars().count();
+    let mut paste_with_shift = configured_shift;
+    if let Some(router) = router {
+        match router.try_deliver(text) {
+            Routed::Delivered => {
+                debug!("delivered: {text}");
+                info!("delivery emitted: zellij bracketed paste ({chars} chars)");
+                return;
+            }
+            Routed::Failed => {
+                error!("delivery failed: zellij bracketed paste incomplete ({chars} chars)");
+                return;
+            }
+            Routed::Fallback {
+                paste_with_shift: selected,
+            } => paste_with_shift = selected,
+        }
+    }
+    let mode = if type_hybrid {
+        "typing (uinput, clipboard fallback)"
+    } else if paste_with_shift {
+        "clipboard + Ctrl+Shift+V paste chord"
+    } else {
+        "clipboard + Ctrl+V paste chord"
+    };
+    info!("delivery started: {mode} ({chars} chars)");
+    if let Err(e) = paster.deliver(text, paste_with_shift) {
+        error!("delivery failed: {mode} failed ({chars} chars): {e:#}");
+        return;
+    }
+    debug!("delivered: {text}");
+    info!("delivery emitted: {mode} ({chars} chars)");
 }
 
 /// How long to let the compositor's X11↔Wayland clipboard bridge settle after
