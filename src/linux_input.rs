@@ -349,24 +349,28 @@ pub fn run_injector(
                     }
                 }
             }
-            InjectMsg::Commit { dictation_id, text } => match &mut voice {
-                Some((active, VoiceRoute::Sink(sink))) if *active == dictation_id => {
-                    if !sink.commit(&text) {
-                        error!("delivery failed: Redcode voice sink rejected committed transcript");
-                        voice = Some((dictation_id, VoiceRoute::Failed));
+            InjectMsg::Commit { dictation_id, text } => {
+                let sink_failed = match &mut voice {
+                    Some((active, VoiceRoute::Sink(sink))) if *active == dictation_id => {
+                        !sink.commit(&text)
                     }
+                    Some((active, VoiceRoute::Fallback)) if *active == dictation_id => {
+                        deliver_text(
+                            &mut paster,
+                            router.as_ref(),
+                            &format!("{text} "),
+                            configured_shift,
+                            type_hybrid,
+                        );
+                        false
+                    }
+                    _ => false,
+                };
+                if sink_failed {
+                    error!("delivery failed: Redcode voice sink rejected committed transcript");
+                    voice = Some((dictation_id, VoiceRoute::Failed));
                 }
-                Some((active, VoiceRoute::Fallback)) if *active == dictation_id => {
-                    deliver_text(
-                        &mut paster,
-                        router.as_ref(),
-                        &format!("{text} "),
-                        configured_shift,
-                        type_hybrid,
-                    );
-                }
-                _ => {}
-            },
+            }
             InjectMsg::Finish(dictation_id) => {
                 if let Some((active, VoiceRoute::Sink(sink))) = &mut voice {
                     if *active == dictation_id && !sink.finish() {
