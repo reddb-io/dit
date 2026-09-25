@@ -7,6 +7,20 @@
 - **audio**: stop the orphaned capture thread that re-opened the mic forever ([#64](https://github.com/reddb-io/dit/pull/64))
 
 
+### Chores
+
+- release v0.5.1 ([#65](https://github.com/reddb-io/dit/pull/65))
+
+
+
+## What's in 0.5.1
+
+
+### Bug Fixes
+
+- **audio**: stop the orphaned capture thread that re-opened the mic forever ([#64](https://github.com/reddb-io/dit/pull/64))
+
+
 
 **Full Changelog**: https://github.com/reddb-io/dit/compare/v0.5.0...v0.5.1
 
