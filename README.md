@@ -348,6 +348,12 @@ Shells, editors and agent TUIs (bash, fish, vim, nano, Claude Code, Codex, redco
 
 How the session is found: dit walks the focused window's process tree for a `zellij` client and reads the session from its command line (`zellij attach NAME`, `zellij --session NAME`) or its `ZELLIJ_SESSION_NAME`; it talks to the server with that client's own binary and `ZELLIJ_SOCKET_DIR`. A client that doesn't name its session is matched by the window title, or by being the only live session. When the focused window's pid is unknown, the only live session (or the one the title names) is used.
 
+### Redcode composer integration
+
+On Linux, `delivery = "auto"` prefers Redcode's local voice-input sink when the focused terminal can be tied to exactly one running Redcode TUI. Live ElevenLabs partials appear in the composer, stable segments replace them, and stopping dictation leaves the assembled text as an editable draft. dit never submits the prompt.
+
+The destination is fixed when recording starts. Direct terminal sessions are matched through the focused window's process tree; zellij sessions are matched by session name. If no sink is available or the match is ambiguous, dit keeps the terminal/clipboard fallback described above. Once a native sink accepts a recording, a later socket failure does not fall through to keyboard injection, which prevents duplicate text or delivery into a newly focused window.
+
 Focused-window detection:
 
 | Session | Provider |

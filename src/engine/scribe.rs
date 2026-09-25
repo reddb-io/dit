@@ -113,7 +113,7 @@ impl Transcriber for ScribeEngine {
                             continue;
                         }
                         last_committed = text.to_string();
-                        injector.type_text(format!("{text} "));
+                        injector.commit(text.to_string());
                         log.committed(text);
                         if preview.enabled {
                             preview.commit(text);
@@ -128,6 +128,7 @@ impl Transcriber for ScribeEngine {
                         let t = evt.get("text").and_then(Value::as_str).unwrap_or("").trim();
                         if !t.is_empty() {
                             pending = t.to_string();
+                            injector.partial(t.to_string());
                             preview.partial(t);
                         }
                     }

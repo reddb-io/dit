@@ -33,6 +33,8 @@ mod linux_input;
 mod models;
 mod notify;
 mod output;
+#[cfg(target_os = "linux")]
+mod redcode;
 mod service;
 mod settings;
 #[cfg(target_os = "linux")]

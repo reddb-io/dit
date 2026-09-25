@@ -5,7 +5,9 @@
 //! The backend (which isn't `Send`) is owned on a dedicated thread and driven
 //! through a channel.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use tracing::{error, info};
@@ -13,11 +15,22 @@ use tracing::{error, info};
 pub enum InjectMsg {
     /// Type `text` into whatever app is focused.
     Type(String),
+    Start(String),
+    Partial {
+        dictation_id: String,
+        text: String,
+    },
+    Commit {
+        dictation_id: String,
+        text: String,
+    },
+    Finish(String),
 }
 
 #[derive(Clone)]
 pub struct Injector {
     tx: Sender<InjectMsg>,
+    dictation_id: Arc<Mutex<Option<String>>>,
 }
 
 impl Injector {
@@ -50,7 +63,62 @@ impl Injector {
             std::thread::spawn(move || run_enigo(rx));
         }
 
-        Ok(Self { tx })
+        Ok(Self {
+            tx,
+            dictation_id: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    pub fn start(&self) {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let id = format!(
+            "{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis())
+                .unwrap_or_default(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        *self.dictation_id.lock().expect("dictation lock poisoned") = Some(id.clone());
+        let _ = self.tx.send(InjectMsg::Start(id));
+    }
+
+    pub fn partial(&self, text: String) {
+        let Some(dictation_id) = self
+            .dictation_id
+            .lock()
+            .expect("dictation lock poisoned")
+            .clone()
+        else {
+            return;
+        };
+        let _ = self.tx.send(InjectMsg::Partial { dictation_id, text });
+    }
+
+    pub fn commit(&self, text: String) {
+        let Some(dictation_id) = self
+            .dictation_id
+            .lock()
+            .expect("dictation lock poisoned")
+            .clone()
+        else {
+            self.type_text(text);
+            return;
+        };
+        let _ = self.tx.send(InjectMsg::Commit { dictation_id, text });
+    }
+
+    pub fn finish(&self) {
+        let Some(dictation_id) = self
+            .dictation_id
+            .lock()
+            .expect("dictation lock poisoned")
+            .take()
+        else {
+            return;
+        };
+        let _ = self.tx.send(InjectMsg::Finish(dictation_id));
     }
 
     pub fn type_text(&self, text: String) {
@@ -76,7 +144,12 @@ fn run_enigo(rx: std::sync::mpsc::Receiver<InjectMsg>) {
             return;
         }
     };
-    while let Ok(InjectMsg::Type(text)) = rx.recv() {
+    while let Ok(message) = rx.recv() {
+        let text = match message {
+            InjectMsg::Type(text) => text,
+            InjectMsg::Commit { text, .. } => format!("{text} "),
+            _ => continue,
+        };
         let chars = text.chars().count();
         if let Err(e) = enigo.text(&text) {
             error!("delivery failed: enigo text input failed ({chars} chars): {e}");

@@ -159,7 +159,7 @@ impl Transcriber for LocalEngine {
             info!("local: inference produced no text");
         } else {
             info!("local: transcript: {transcript}");
-            injector.type_text(format!("{transcript} "));
+            injector.commit(transcript.clone());
             let mut log = SessionLog::open(session_max_age_days, session_max_count);
             log.committed(&transcript);
         }
