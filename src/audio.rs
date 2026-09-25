@@ -167,6 +167,9 @@ pub fn spawn_capture(
     });
 }
 
+/// Upper bound for the retry backoff when no input device is usable yet.
+const MAX_CAPTURE_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn run_capture(
     prefer: Option<String>,
     stop: Arc<AtomicBool>,
@@ -174,7 +177,14 @@ fn run_capture(
     rate_tx: oneshot::Sender<u32>,
 ) {
     let mut first_rate = Some(rate_tx);
+    let mut backoff = std::time::Duration::from_secs(1);
     while !stop.load(Ordering::Relaxed) {
+        // The session that owns this capture is gone (its receiver was
+        // dropped). Stop instead of re-opening the microphone forever.
+        if events_tx.is_closed() {
+            debug!("audio receiver dropped; stopping capture");
+            break;
+        }
         match run_capture_once(&prefer, stop.clone(), events_tx.clone(), &mut first_rate) {
             Ok(()) => break,
             Err(e) if stop.load(Ordering::Relaxed) => {
@@ -182,8 +192,12 @@ fn run_capture(
                 break;
             }
             Err(e) => {
-                warn!("audio capture unavailable, retrying: {e:#}");
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                warn!(
+                    "audio capture unavailable, retrying in {}s: {e:#}",
+                    backoff.as_secs()
+                );
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(MAX_CAPTURE_RETRY_BACKOFF);
             }
         }
     }
@@ -320,14 +334,25 @@ fn open_stream(
         .play()
         .with_context(|| format!("could not start input stream for '{name}'"))?;
     let started = std::time::Instant::now();
+    let mut receiver_gone = false;
     while !stop.load(Ordering::Relaxed) && !stream_failed.load(Ordering::Relaxed) {
+        // The consumer is gone: don't blame the device, tear the stream down
+        // and let run_capture exit cleanly instead of looping forever.
+        if events_tx.is_closed() {
+            receiver_gone = true;
+            break;
+        }
+        // A device only counts as "dead" when it opened but produced no audio
+        // at all. Frames leaving the callback yet not being delivered (dropped)
+        // means the consumer is behind or gone, not that the mic is broken, so
+        // those must not disqualify an otherwise working input device.
         if delivered_samples.load(Ordering::Relaxed) == 0
+            && dropped_samples.load(Ordering::Relaxed) == 0
             && started.elapsed() > std::time::Duration::from_secs(1)
         {
             warn!(
-                "audio stream for '{name}' started but delivered no samples after {} callbacks ({} dropped samples); trying next input device",
-                callbacks.load(Ordering::Relaxed),
-                dropped_samples.load(Ordering::Relaxed)
+                "audio stream for '{name}' started but captured no samples after {} callbacks; trying next input device",
+                callbacks.load(Ordering::Relaxed)
             );
             stream_failed.store(true, Ordering::Relaxed);
             break;
@@ -335,7 +360,10 @@ fn open_stream(
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     drop(stream);
-    if stream_failed.load(Ordering::Relaxed) {
+    if receiver_gone {
+        debug!("audio receiver dropped; stopping capture for '{name}'");
+        Ok(())
+    } else if stream_failed.load(Ordering::Relaxed) {
         Err(anyhow!("input stream for '{name}' stopped"))
     } else {
         Ok(())
