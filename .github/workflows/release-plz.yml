@@ -11,8 +11,7 @@ name: release-plz
 # explicitly — workflow_dispatch IS allowed to fire from GITHUB_TOKEN.
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write       # create the version tag + commit the changelog
@@ -25,6 +24,7 @@ concurrency:
 
 jobs:
   release-plz:
+    if: (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     name: Version from commits
     runs-on: ubuntu-latest
     steps:
